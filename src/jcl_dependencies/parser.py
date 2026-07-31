@@ -628,8 +628,17 @@ class _Parser:
         card_dds = ("SYSIN", "TOOLIN", "SYSTSIN", "DFSPARM")
         for step in self.job.steps:
             for dd in step.dds:
+                # Card DDs ONLY. The allow-list used to gate just the dataset-resolution
+                # branch below, while INSTREAM lines were content-sniffed on every DD -
+                # so transaction data on `//INDATA DD *` containing action words
+                # (`DELETE ACCT001 FROM MASTER`) was classified as an IDCAMS control
+                # card, and the lineage view then published a phantom destructive
+                # operation. Instream DATA is data; only the utilities' own card DDs
+                # carry syntax.
+                if dd.ddname not in card_dds:
+                    continue
                 lines = list(dd.instream_lines)
-                if not lines and dd.ddname in card_dds and dd.segments:
+                if not lines and dd.segments:
                     seg = dd.segments[0]
                     if seg.dsn and not seg.sysout and not seg.instream:
                         name = seg.dsn + (f"({seg.member})" if seg.member else "")

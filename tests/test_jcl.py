@@ -470,3 +470,31 @@ def test_a_closure_deeper_than_the_bound_says_so_instead_of_looking_complete():
     assert len(closure) == 1
     assert closure[0]["status"] == "skipped"
     assert "3 resolution rounds" in closure[0]["reason"]
+
+
+# --------------------------------------------------------------------------- #
+# instream DATA is data, not control cards (audit finding #10)
+# --------------------------------------------------------------------------- #
+
+def test_instream_data_on_a_non_card_dd_is_never_classified_as_control():
+    """Content-sniffing ran over the instream lines of EVERY DD, so transaction data on
+    `//INDATA DD *` containing action words (`DELETE ACCT001 FROM MASTER`) was
+    classified as an IDCAMS control card - and the lineage view then published a
+    phantom destructive operation. Only the utilities' own card DDs carry syntax."""
+    job = parse_jcl(
+        "//J JOB (A),'T'\n"
+        "//S1 EXEC PGM=MYPROG\n"
+        "//INDATA DD *\n"
+        "DELETE ACCT001 FROM MASTER PLEASE\n"
+        "REPRO INFILE(A) OUTFILE(B)\n"
+        "/*\n"
+        "//S2 EXEC PGM=IDCAMS\n"
+        "//SYSIN DD *\n"
+        " DELETE PROD.OLD.FILE\n"
+        "/*\n")
+    indata = next(dd for s in job.steps for dd in s.dds if dd.ddname == "INDATA")
+    assert indata.control is None
+    # ...while a REAL control card on SYSIN still classifies.
+    sysin = next(dd for s in job.steps for dd in s.dds if dd.ddname == "SYSIN")
+    assert sysin.control["utility"] == "IDCAMS"
+    assert sysin.control["operations"] == [{"op": "DELETE", "target": "PROD.OLD.FILE"}]
