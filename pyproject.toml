@@ -14,7 +14,7 @@ keywords = ["jcl", "proc", "mainframe", "modernization", "lineage", "parser"]
 
 # Core ONLY - never cobol-xstate. The COBOL says what a program does; the JCL says what
 # dataset it does it to. They are peers that meet at a plain manifest dict, so a JCL
-# install carries no COBOL modelling engine. tests/test_package_boundaries.py enforces it.
+# install carries no COBOL modelling engine. tests/test_boundaries.py enforces it.
 dependencies = ["cobol-xstate-core>=0.1,<0.2"]
 
 [project.optional-dependencies]
@@ -25,3 +25,10 @@ cobol-xstate-jcl = "cobol_xstate_jcl.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# Put the src/ layout on sys.path so `python -m pytest` works without installing the
+# package (pytest >= 7). cobol-xstate-core still has to be installed - it is a real
+# dependency, not a sibling directory this repo can reach.
+pythonpath = ["src"]

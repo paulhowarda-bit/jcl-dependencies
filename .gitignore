@@ -1,0 +1,39 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.pytest_cache/
+.venv/
+venv/
+env/
+
+# Tooling
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# Claude Code (personal, per-developer settings)
+.claude/settings.json
+.claude/settings.local.json
+
+# Generated output. A run writes everything into --outdir, which defaults to ./out.
+out/
+# ...and these cover a run pointed somewhere else, e.g. --outdir .
+*.jcl.artifacts.json
+*.jcl.lineage.json
+*.jcl.prefetch.json
+*.jcl.fetch.json
+
+# NOTE: goldens/ and tests/fixtures/ are deliberately NOT ignored. The committed
+# manifest fixture is this package's half of a cross-repository contract, and the
+# goldens are the byte-stability ratchet - both are worthless if they are not tracked.
