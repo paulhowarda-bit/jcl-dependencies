@@ -33,8 +33,8 @@ EXAMPLES = REPO / "examples"
 
 sys.path.insert(0, str(REPO / "src"))
 
-from cobol_xstate_jcl.parser import parse_jcl                       # noqa: E402
-from cobol_xstate_jcl.views import (build_jcl_artifacts,            # noqa: E402
+from jcl_dependencies.parser import parse_jcl                       # noqa: E402
+from jcl_dependencies.views import (build_jcl_artifacts,            # noqa: E402
                                     build_jcl_lineage)
 
 INDENT = 2  # the CLI default; the hashes are of what a default run would write

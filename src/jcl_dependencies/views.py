@@ -260,7 +260,7 @@ def build_jcl_lineage(job: Job) -> dict:
         rec["intermediate"] = bool(rec["producedBy"] and rec["consumedBy"])
 
     return {
-        "format": "cobol-xstate-jcl-lineage",
+        "format": "jcl-dependencies-lineage",
         "job": job.name,
         "source": job.source_name,
         "note": (
@@ -424,7 +424,7 @@ def build_jcl_artifacts(job: Job) -> dict:
     artifacts.sort(key=lambda r: (_CLASS_ORDER.get(r["kind"], 9), r["artifact"]))
 
     return {
-        "format": "cobol-xstate-jcl-artifacts",
+        "format": "jcl-dependencies-artifacts",
         "job": job.name,
         "source": job.source_name,
         "note": (

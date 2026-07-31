@@ -23,10 +23,10 @@ from cobol_xstate_core.report import report_stages
 from . import PACKAGE_LOGGER
 from .api import analyze, gather
 
-# Explicit name, NOT __name__: this module is also run as `python -m cobol_xstate_jcl.cli`,
+# Explicit name, NOT __name__: this module is also run as `python -m jcl_dependencies.cli`,
 # where __name__ == "__main__" would put the logger outside the package hierarchy and out
 # of configure_logging's reach (so INFO/progress would be silently dropped).
-_log = logging.getLogger("cobol_xstate_jcl.cli")
+_log = logging.getLogger("jcl_dependencies.cli")
 
 _SUFFIXES = (".jcl.artifacts.json", ".jcl.lineage.json",
              ".jcl.prefetch.json", ".jcl.fetch.json")
@@ -34,7 +34,7 @@ _SUFFIXES = (".jcl.artifacts.json", ".jcl.lineage.json",
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
-        prog="cobol-xstate-jcl",
+        prog="jcl-dependencies",
         description="Parse a JCL job or PROC and emit its dataset dataflow, its "
                     "control-card field lineage, and the manifest of everything it "
                     "depends on - following cataloged PROCs, INCLUDE members and "
@@ -82,7 +82,7 @@ def run(argv: Optional[List[str]] = None, timing_sink=None) -> int:
     """Parse args, configure logging, and dispatch, behind the top-level error boundary."""
     args = build_parser().parse_args(argv)
     # BOTH roots: retrieval logs from cobol_xstate_core.*, everything else from
-    # cobol_xstate_jcl.*. A root nobody configures propagates to the root logger, or
+    # jcl_dependencies.*. A root nobody configures propagates to the root logger, or
     # prints WARNING+ via logging's lastResort - which would end -qq's silence.
     configure_logging(verbose=args.verbose or (1 if args.debug else 0), quiet=args.quiet,
                       loggers=(CORE_LOGGER, PACKAGE_LOGGER))

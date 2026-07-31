@@ -50,8 +50,8 @@ def test_the_blocker_actually_blocks():
 
 def test_the_package_works_with_the_cobol_package_unavailable():
     proc = _isolated("""
-        from cobol_xstate_jcl import parse_jcl, build_jcl_lineage, build_jcl_artifacts
-        from cobol_xstate_jcl.api import analyze
+        from jcl_dependencies import parse_jcl, build_jcl_lineage, build_jcl_artifacts
+        from jcl_dependencies.api import analyze
         a = analyze("//J JOB\\n//S EXEC PGM=IEFBR14\\n//D DD DSN=A.B,DISP=SHR\\n",
                     retrieve=False)
         assert len(a.job.steps) == 1
@@ -67,7 +67,7 @@ def test_the_cli_works_with_the_cobol_package_unavailable(tmp_path):
     examples = Path(__file__).resolve().parents[1] / "examples"
     proc = _isolated(f"""
         import io, contextlib, os
-        from cobol_xstate_jcl.cli import run
+        from jcl_dependencies.cli import run
         out = {str(tmp_path / "o")!r}
         with contextlib.redirect_stderr(io.StringIO()):
             rc = run([{str(examples / "acctunld.jcl")!r}, "--outdir", out, "-q"])
@@ -83,7 +83,7 @@ def test_the_bind_join_takes_a_dict_and_needs_no_cobol_types():
     a plain manifest dict, which is precisely what keeps this dependency from existing."""
     proc = _isolated("""
         import json, pathlib
-        from cobol_xstate_jcl import bind_cobol_artifacts, parse_jcl
+        from jcl_dependencies import bind_cobol_artifacts, parse_jcl
         manifest = json.loads(pathlib.Path(%r).read_text(encoding="utf-8"))
         job = parse_jcl(pathlib.Path(%r).read_text(), source_name="acctunld.jcl")
         out = bind_cobol_artifacts(manifest, [job])
@@ -100,9 +100,9 @@ def test_the_bind_join_takes_a_dict_and_needs_no_cobol_types():
 def test_no_module_imports_the_cobol_package(module):
     """Read the source too: an import inside a rarely-taken branch would not show up in
     a passing import test."""
-    src = (SRC / "cobol_xstate_jcl" / f"{module}.py").read_text(encoding="utf-8")
+    src = (SRC / "jcl_dependencies" / f"{module}.py").read_text(encoding="utf-8")
     for line in src.splitlines():
         s = line.strip()
         if s.startswith(("import ", "from ")):
             assert "cobol_xstate." not in s and s != "import cobol_xstate", (
-                f"cobol_xstate_jcl/{module}.py imports the COBOL package: {s}")
+                f"jcl_dependencies/{module}.py imports the COBOL package: {s}")

@@ -1,4 +1,4 @@
-"""cobol_xstate_jcl - recover what a JCL job or PROC actually does, and what it needs.
+"""jcl_dependencies - recover what a JCL job or PROC actually does, and what it needs.
 
 The COBOL says *what a program does*; it does not say *what dataset it does it to*. That
 binding lives in JCL, and so does the rest of the operational truth a modernization needs:
@@ -9,7 +9,7 @@ This package answers those questions and retrieves what it needs to answer them.
 peer of ``cobol_xstate``, not a part of it: the two share only the estate-retrieval half
 (``cobol_xstate_core``), so a JCL run carries no COBOL modeling engine, and neither
 package imports the other. The one place they meet - binding a COBOL program's file
-ddnames to real datasets - is :func:`cobol_xstate_jcl.views.bind_cobol_artifacts`, which
+ddnames to real datasets - is :func:`jcl_dependencies.views.bind_cobol_artifacts`, which
 takes a plain manifest **dict**, not a COBOL object. That is deliberate, and it is what
 keeps this direction of the dependency from existing at all.
 
@@ -26,7 +26,7 @@ import logging as _logging
 #: This package's top-level logger name. The CLI passes it - alongside core's own root -
 #: to ``cobol_xstate_core.logging_setup.configure_logging``; a root nobody configures
 #: either propagates to the root logger or prints via logging's lastResort.
-PACKAGE_LOGGER = "cobol_xstate_jcl"
+PACKAGE_LOGGER = "jcl_dependencies"
 
 _logging.getLogger(PACKAGE_LOGGER).addHandler(_logging.NullHandler())
 

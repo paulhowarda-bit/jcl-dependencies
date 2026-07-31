@@ -1,4 +1,4 @@
-# cobol-xstate-jcl
+# jcl-dependencies
 
 Parse IBM JCL jobs and PROCs, and recover what they actually do: which programs run in
 what order under what conditions, which datasets flow from one step to the next, how
@@ -11,7 +11,7 @@ needs.
 ## Install
 
 ```bash
-pip install cobol-xstate-jcl
+pip install jcl-dependencies
 ```
 
 It depends on `cobol-xstate-core` (the estate boundary and the two-stage dependency
@@ -24,19 +24,19 @@ modelling engine. `tests/test_boundaries.py` enforces that.
 ## Use
 
 ```bash
-cobol-xstate-jcl job.jcl                      # 2 views + both retrieval reports -> ./out
-cobol-xstate-jcl job.jcl --target lineage     # just the dataflow
-cobol-xstate-jcl job.jcl --summary            # + a human summary on stderr
+jcl-dependencies job.jcl                      # 2 views + both retrieval reports -> ./out
+jcl-dependencies job.jcl --target lineage     # just the dataflow
+jcl-dependencies job.jcl --summary            # + a human summary on stderr
 
 # Gather where the estate is reachable, model where it is not
-cobol-xstate-jcl job.jcl --gather-only ./bundle
-cobol-xstate-jcl job.jcl --from-bundle ./bundle    # no network at all
+jcl-dependencies job.jcl --gather-only ./bundle
+jcl-dependencies job.jcl --from-bundle ./bundle    # no network at all
 ```
 
 As a library:
 
 ```python
-from cobol_xstate_jcl import analyze
+from jcl_dependencies import analyze
 
 job = analyze(open("job.jcl").read(), source_name="job.jcl", retrieve=False)
 job.lineage()      # step-to-step dataset dataflow + control-card field lineage
@@ -65,7 +65,7 @@ of a real COBOL manifest — this repository's half of that contract, so its tes
 COBOL install. The COBOL repository regenerates it and fails if the shape drifts, which
 is how a schema change is caught before release rather than after.
 
-`BIND_API_VERSION` in `cobol_xstate_jcl/__init__.py` is the contract version. The COBOL
+`BIND_API_VERSION` in `jcl_dependencies/__init__.py` is the contract version. The COBOL
 side checks it at import time, because a skewed pair fails invisibly otherwise: an
 unbound manifest looks fine, since its file rows say exactly what an unbound run's rows
 say.
