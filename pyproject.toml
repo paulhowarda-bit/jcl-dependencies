@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cobol-xstate-jcl"
+version = "0.1.0"
+description = "Parse IBM JCL jobs and PROCs: dataset dataflow, control-card field lineage, and the manifest of everything a job depends on."
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "Paul Howard" }]
+keywords = ["jcl", "proc", "mainframe", "modernization", "lineage", "parser"]
+
+# Core ONLY - never cobol-xstate. The COBOL says what a program does; the JCL says what
+# dataset it does it to. They are peers that meet at a plain manifest dict, so a JCL
+# install carries no COBOL modelling engine. tests/test_package_boundaries.py enforces it.
+dependencies = ["cobol-xstate-core>=0.1,<0.2"]
+
+[project.optional-dependencies]
+dev = ["pytest>=7"]
+
+[project.scripts]
+cobol-xstate-jcl = "cobol_xstate_jcl.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]

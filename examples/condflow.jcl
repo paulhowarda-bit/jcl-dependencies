@@ -1,0 +1,21 @@
+//CONDFLOW JOB (OPS),'CONDITIONAL FLOW',CLASS=A
+//*
+//* Conditional step selection: IF/THEN/ELSE/ENDIF around a load-vs-repair
+//* pair, a COND=EVEN cleanup, and a COND=(4,LT) report (the back-to-front
+//* form: bypassed if 4 < any preceding RC, i.e. runs only when all RC <= 4).
+//*
+//EXTRACT  EXEC PGM=EXTRACT1
+//OUTDD    DD  DSN=PROD.DAY.EXTRACT,DISP=(NEW,CATLG,DELETE)
+//         IF (EXTRACT.RC = 0) THEN
+//LOADOK   EXEC PGM=DAYLOAD
+//INDD     DD  DSN=PROD.DAY.EXTRACT,DISP=SHR
+//         ELSE
+//FALLBACK EXEC PGM=DAYREPAIR
+//INDD     DD  DSN=PROD.DAY.EXTRACT,DISP=SHR
+//         ENDIF
+//CLEANUP  EXEC PGM=IEFBR14,COND=EVEN
+//WORKDEL  DD  DSN=PROD.DAY.WORK,DISP=(MOD,DELETE)
+//REPORT   EXEC PGM=DAYRPT,COND=(4,LT)
+//RPTIN    DD  DSN=PROD.DAY.EXTRACT,DISP=SHR
+//SYSOUT   DD  SYSOUT=*
+//
