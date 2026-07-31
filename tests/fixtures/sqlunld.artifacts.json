@@ -1,0 +1,52 @@
+{
+  "format": "cobol-xstate-artifacts",
+  "program": "SQLUNLD",
+  "source": "sqlunld.cbl",
+  "note": "One row per artifact this program is related to. 'dependency' is 'runtime' for the external endpoints it touches when it runs - Db2 tables, files (datasets), called programs, queues, maps, IMS segments, the caller - and 'compile-time' for the copybooks (COPY / EXEC SQL INCLUDE) it is built from. 'io' (runtime rows) is read/write/read-write. 'identity' is 'global' when the name is already an estate-wide identity (a Db2 table, a load-module name) and 'program-local' when it is not - a ddname, a CICS file name, a queue alias. For a program-local artifact, 'resolvedBy'/'needs' name the OTHER artifact (JCL, the CSD, a DDL, the binder) you must read to make it joinable across programs: a file's ddname is a binding in JCL, and the dataset name (DSN) - the real identity - is there, not here. Response registers, handled conditions, and system intrinsics are not related artifacts and are listed under 'excluded' with the reason. Nothing is invented; see 'flags'. See docs/mainframe-artifacts.md for why the middle binding is not the identity.",
+  "artifacts": [
+    {
+      "artifact": "ACCOUNT",
+      "kind": "db2-table",
+      "dependency": "runtime",
+      "io": "read",
+      "verbs": [
+        "FETCH"
+      ],
+      "identity": "global",
+      "lines": [
+        38
+      ],
+      "needs": "Db2 DDL / DCLGEN to resolve columns, types, and keys (the table name itself is catalog-global)"
+    },
+    {
+      "artifact": "OUT-FILE",
+      "kind": "file",
+      "dependency": "runtime",
+      "io": "write",
+      "verbs": [
+        "WRITE",
+        "OPEN OUTPUT"
+      ],
+      "identity": "program-local",
+      "lines": [
+        35,
+        47
+      ],
+      "ddname": "OUTDD",
+      "organization": "SEQUENTIAL",
+      "resolvedBy": "JCL DD statement",
+      "needs": "the JCL //<ddname> DD DSN=... to resolve the dataset name (DSN); the ddname alone is a program-to-JCL binding, not the identity"
+    }
+  ],
+  "patterns": [
+    "unload: reads Db2 (ACCOUNT) and writes a file (OUT-FILE)"
+  ],
+  "excluded": [
+    {
+      "name": "DB2",
+      "endpointType": "response",
+      "reason": "a response register (SQLCODE / EIB / FILE STATUS), i.e. this program reacting to a subsystem, not a related artifact"
+    }
+  ],
+  "flags": []
+}
