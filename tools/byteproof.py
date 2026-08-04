@@ -32,17 +32,29 @@ REPO = Path(__file__).resolve().parents[1]
 EXAMPLES = REPO / "examples"
 
 sys.path.insert(0, str(REPO / "src"))
+sys.path.insert(0, str(REPO / "tests"))     # the recorded fake estate client
+
+from fakes.estate import fetch_artifact                             # noqa: E402
+
+from cobol_xstate_core.fetch import fetch_dependencies              # noqa: E402
 
 from jcl_dependencies.parser import parse_jcl                       # noqa: E402
+from jcl_dependencies.prefetch import prefetch_jcl                  # noqa: E402
 from jcl_dependencies.views import (build_jcl_artifacts,            # noqa: E402
                                     build_jcl_lineage)
 
 INDENT = 2  # the CLI default; the hashes are of what a default run would write
 
 
-def normalize(text: str) -> str:
-    """Replace this checkout's directories with stable tokens, so goldens are portable."""
-    for root, token in ((EXAMPLES, "<EXAMPLES>"), (REPO, "<REPO>")):
+def normalize(text: str, run_dir: Path = None) -> str:
+    """Replace this checkout's directories - and a run's own output directory - with
+    stable tokens, so goldens are portable. `copiedTo` in the retrieval reports names
+    the run's deps/ directory; a locally-resolved member's `source` names a checkout
+    path. Both are machine-dependent before this tool touches them; nothing else is
+    normalized."""
+    roots = ([(run_dir, "<RUNDIR>")] if run_dir else []) + \
+        [(EXAMPLES, "<EXAMPLES>"), (REPO, "<REPO>")]
+    for root, token in roots:
         for form in (str(root), str(root).replace("\\", "/"),
                      str(root).replace("\\", "\\\\")):
             text = text.replace(form, token)
@@ -75,13 +87,47 @@ def views(path: Path) -> Dict[str, str]:
     }
 
 
+def reports(path: Path, run_dir: Path) -> Dict[str, str]:
+    """Both RETRIEVAL reports for one job, run against the recorded fake estate.
+
+    The views above are estate-free; these two files are not - their contents depend on
+    what an artifact service answered, so they are exercised against
+    ``tests/fakes/estate.py``, which answers from a fixed table. This is the half of
+    the ratchet that guards the record-and-replay closure (prefetch_jcl) and the fetch
+    plan's row vocabulary - the machinery a refactor is most likely to shorten
+    silently.
+    """
+    source = path.read_text(encoding="utf-8", errors="replace")
+    deps = str(run_dir / "deps")
+    pre = prefetch_jcl(source, fetch_artifact, paths=[str(EXAMPLES)], dest=deps,
+                       source_name=path.name, jobs=1)
+    job = parse_jcl(source, resolver=pre.resolver(), source_name=path.name)
+    art = build_jcl_artifacts(job)
+    fetched = fetch_dependencies(art, fetch_artifact, dest=deps, prefetched=pre.store,
+                                 jobs=1)
+    return {
+        "jcl.prefetch": guarded(lambda: json_text(pre.report())),
+        "jcl.fetch": guarded(lambda: json_text(fetched)),
+    }
+
+
 def build_manifest() -> Dict[str, str]:
+    import shutil
+    import tempfile
     out: Dict[str, str] = {}
-    for src in sorted(EXAMPLES.iterdir()):
-        if src.suffix.lower() not in (".jcl", ".prc", ".proc"):
-            continue
-        for view, text in views(src).items():
-            out[f"{src.name}::{view}"] = digest(text)
+    tmp = Path(tempfile.mkdtemp(prefix="jcl-byteproof-"))
+    try:
+        for src in sorted(EXAMPLES.iterdir()):
+            if src.suffix.lower() not in (".jcl", ".prc", ".proc"):
+                continue
+            for view, text in views(src).items():
+                out[f"{src.name}::{view}"] = digest(text)
+            run_dir = tmp / src.stem
+            for view, text in reports(src, run_dir).items():
+                out[f"{src.name}::{view}"] = hashlib.sha256(
+                    normalize(text, run_dir).encode("utf-8")).hexdigest()
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
     return dict(sorted(out.items()))
 
 
