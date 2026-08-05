@@ -1,6 +1,6 @@
 """A deterministic stand-in for the estate's artifact service (mf-fetch).
 
-The real default client is ``network_drive.mf_fetch:fetch_artifact`` - an external
+The real default client is ``cast_clients.mf_fetch:fetch_artifact`` - an external
 library that talks to a mainframe share. Nothing here can reach it, so without a
 stand-in the retrieval reports are untestable and the byte-stability ratchet could not
 cover them.
