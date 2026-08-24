@@ -88,6 +88,11 @@ python -m pytest -q
 python tools/byteproof.py --check goldens/views.sha256   # byte-stability ratchet
 ```
 
+From a bare dual-checkout - mainframe-common beside this repo, nothing installed - the
+suite and the ratchet find `../mainframe-common/mainframe-artifacts` automatically
+(override with `MAINFRAME_COMMON_REPO`); without either, the suite ends as one clean
+skip naming the exact pip command.
+
 Output is byte-stable and deterministic: a refactor that should not change output must
 produce identical bytes, and a green test run does not prove that. The ratchet hashes
 every view of every example under two `PYTHONHASHSEED` values. Re-record only when an

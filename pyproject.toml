@@ -29,6 +29,6 @@ where = ["src"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 # Put the src/ layout on sys.path so `python -m pytest` works without installing the
-# package (pytest >= 7). mainframe-artifacts still has to be installed - it is a real
-# dependency, not a sibling directory this repo can reach.
-pythonpath = ["src"]
+# package (pytest >= 7). mainframe-artifacts arrives installed or via the sibling
+# mainframe-common checkout (tests/_mainframe_common.py; override MAINFRAME_COMMON_REPO).
+pythonpath = ["src", "tests"]

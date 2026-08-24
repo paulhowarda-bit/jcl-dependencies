@@ -20,11 +20,18 @@ from pathlib import Path
 
 import pytest
 
+from _mainframe_common import CHECKOUT
+
 SRC = Path(__file__).resolve().parents[1] / "src"
+# The child interpreters cannot inherit conftest's sys.path insertion, so they get the
+# same trees explicitly: this repo's src plus the sibling checkout's mainframe-artifacts
+# (a nonexistent path is inert - the pip-installed distribution carries the run then).
+_TREES = (str(CHECKOUT / "mainframe-artifacts" / "src"), str(SRC))
 
 _PREAMBLE = textwrap.dedent("""
     import sys
-    sys.path.insert(0, %r)
+    for _tree in %r:
+        sys.path.insert(0, _tree)
 
     class Blocker:
         def find_spec(self, name, path=None, target=None):
@@ -39,7 +46,7 @@ _PREAMBLE = textwrap.dedent("""
 def _isolated(body):
     """A fresh interpreter: blocking a module already in sys.modules does nothing."""
     return subprocess.run([sys.executable, "-c",
-                           _PREAMBLE % (str(SRC),) + textwrap.dedent(body)],
+                           _PREAMBLE % (_TREES,) + textwrap.dedent(body)],
                           capture_output=True, text=True)
 
 

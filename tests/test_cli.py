@@ -75,10 +75,15 @@ def test_gather_then_replay_reproduces_the_views(tmp_path):
 def test_python_dash_m_works():
     import os
     import subprocess
-    # PREPEND to the inherited PYTHONPATH rather than replacing it: mainframe-artifacts
-    # may be reaching this interpreter the same way, and the child needs it too.
+    # PREPEND to the inherited PYTHONPATH rather than replacing it, and hand the child
+    # the sibling mainframe-artifacts tree the parent found the same way (conftest's
+    # sys.path insertion does not survive into a subprocess; a nonexistent path is
+    # inert when the distribution is pip-installed instead).
+    from _mainframe_common import CHECKOUT
     inherited = os.environ.get("PYTHONPATH", "")
-    pypath = os.pathsep.join(p for p in (str(REPO / "src"), inherited) if p)
+    pypath = os.pathsep.join(p for p in (
+        str(REPO / "src"), str(CHECKOUT / "mainframe-artifacts" / "src"),
+        inherited) if p)
     proc = subprocess.run(
         [sys.executable, "-m", "jcl_dependencies", "--help"],
         capture_output=True, text=True, cwd=str(REPO),

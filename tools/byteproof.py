@@ -34,6 +34,13 @@ EXAMPLES = REPO / "examples"
 sys.path.insert(0, str(REPO / "src"))
 sys.path.insert(0, str(REPO / "tests"))     # the recorded fake estate client
 
+# mainframe-artifacts arrives installed or from the sibling mainframe-common checkout
+# (override with MAINFRAME_COMMON_REPO) - the same discovery the test suite performs.
+from _mainframe_common import ensure_on_path                        # noqa: E402
+_missing = ensure_on_path()
+if _missing is not None:
+    raise SystemExit(f"error: {_missing}")
+
 from fakes.estate import fetch_artifact                             # noqa: E402
 
 from mainframe_artifacts.fetch import fetch_dependencies              # noqa: E402
