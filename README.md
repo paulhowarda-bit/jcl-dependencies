@@ -18,6 +18,15 @@ It depends on `cobol-xstate-core` (the estate boundary and the two-stage depende
 retrieval, shared with the COBOL tool) and on nothing else. Pure Python standard
 library, Python ≥ 3.9.
 
+`cobol-xstate-core` ships from the
+[mainframe-common](https://github.com/paulhowarda-bit/mainframe-common) repository (one
+repo, two distributions; core is its `core/` subdirectory). Until it is on an index,
+install it straight from that repo:
+
+```bash
+pip install "cobol-xstate-core @ git+https://github.com/paulhowarda-bit/mainframe-common#subdirectory=core"
+```
+
 **It does not depend on `cobol-xstate`.** The two are peers: a JCL box carries no COBOL
 modelling engine. `tests/test_boundaries.py` enforces that.
 
@@ -73,7 +82,8 @@ say.
 ## Development
 
 ```bash
-python -m pip install -e . cobol-xstate-core
+# core comes from a sibling mainframe-common checkout (or the git+ line above)
+python -m pip install -e ../mainframe-common/core -e .
 python -m pytest -q
 python tools/byteproof.py --check goldens/views.sha256   # byte-stability ratchet
 ```
