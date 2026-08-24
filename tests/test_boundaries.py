@@ -1,10 +1,12 @@
-"""This package must never depend on the COBOL one.
+"""This package must never depend on the COBOL ones.
 
-They are peers: the COBOL tool says what a program does, this one says what dataset it
+They are peers: the COBOL tools say what a program does, this one says what dataset it
 does it to, and they meet at a plain manifest dict. Nothing about the source layout
 enforces that - a single stray import would erase it while every other test still passed,
-and the cost is not abstract: a JCL box would start carrying a COBOL modelling engine it
-never executes, and this repository could no longer be released on its own.
+and the cost is not abstract: a JCL box would start carrying a COBOL modelling engine
+(``cobol_xstate``) or a COBOL parse front-end (``cobol_parse``, the mainframe-common
+parser/ distribution) it never executes, and this repository could no longer be released
+on its own. A core+jcl install must be unable to find either package.
 
 A note on how, because getting it wrong is easy and silent: ``sys.meta_path`` finders are
 consulted through ``find_spec``. ``find_module`` was REMOVED in Python 3.12, so a blocker
@@ -26,7 +28,7 @@ _PREAMBLE = textwrap.dedent("""
 
     class Blocker:
         def find_spec(self, name, path=None, target=None):
-            if name.split(".")[0] == "cobol_xstate":
+            if name.split(".")[0] in ("cobol_xstate", "cobol_parse"):
                 raise ImportError("BLOCKED " + name)
             return None
 
@@ -41,11 +43,12 @@ def _isolated(body):
                           capture_output=True, text=True)
 
 
-def test_the_blocker_actually_blocks():
+@pytest.mark.parametrize("package", ["cobol_xstate", "cobol_parse"])
+def test_the_blocker_actually_blocks(package):
     """Guard the guard. If this passes when it should not, everything below is vacuous."""
-    proc = _isolated("import cobol_xstate")
+    proc = _isolated(f"import {package}")
     assert proc.returncode != 0
-    assert "BLOCKED cobol_xstate" in proc.stderr
+    assert f"BLOCKED {package}" in proc.stderr
 
 
 def test_the_package_works_with_the_cobol_package_unavailable():
@@ -104,5 +107,8 @@ def test_no_module_imports_the_cobol_package(module):
     for line in src.splitlines():
         s = line.strip()
         if s.startswith(("import ", "from ")):
-            assert "cobol_xstate." not in s and s != "import cobol_xstate", (
-                f"jcl_dependencies/{module}.py imports the COBOL package: {s}")
+            for blocked in ("cobol_xstate", "cobol_parse"):
+                assert (f"{blocked}." not in s
+                        and s != f"import {blocked}"
+                        and not s.startswith(f"from {blocked} ")), (
+                    f"jcl_dependencies/{module}.py imports the COBOL package: {s}")
