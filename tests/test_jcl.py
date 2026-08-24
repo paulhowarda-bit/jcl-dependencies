@@ -437,7 +437,7 @@ def test_every_external_member_is_asked_for_through_the_resolver():
 def test_the_closure_converges_and_costs_one_round_per_level_of_nesting():
     """Three levels of nesting resolve in three retrieval rounds, then the parse stops
     asking. A change to the replay loop shows up here as a different round count."""
-    from cobol_xstate_core.prefetch import PrefetchResult
+    from mainframe_artifacts.prefetch import PrefetchResult
     from jcl_dependencies.prefetch import prefetch_jcl
 
     rounds = []

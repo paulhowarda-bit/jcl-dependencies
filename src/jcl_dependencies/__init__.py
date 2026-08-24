@@ -7,7 +7,7 @@ one step to the next, and which control cards reshape the bytes on the way throu
 
 This package answers those questions and retrieves what it needs to answer them. It is a
 peer of ``cobol_xstate``, not a part of it: the two share only the estate-retrieval half
-(``cobol_xstate_core``), so a JCL run carries no COBOL modeling engine, and neither
+(``mainframe_artifacts``), so a JCL run carries no COBOL modeling engine, and neither
 package imports the other. The one place they meet - binding a COBOL program's file
 ddnames to real datasets - is :func:`jcl_dependencies.views.bind_cobol_artifacts`, which
 takes a plain manifest **dict**, not a COBOL object. That is deliberate, and it is what
@@ -23,8 +23,8 @@ that is a different graph and this package does not pretend to model it.
 
 import logging as _logging
 
-#: This package's top-level logger name. The CLI passes it - alongside core's own root -
-#: to ``cobol_xstate_core.logging_setup.configure_logging``; a root nobody configures
+#: This package's top-level logger name. The CLI passes it - alongside mainframe-artifacts' own root -
+#: to ``mainframe_artifacts.logging_setup.configure_logging``; a root nobody configures
 #: either propagates to the root logger or prints via logging's lastResort.
 PACKAGE_LOGGER = "jcl_dependencies"
 

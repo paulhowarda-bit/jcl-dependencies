@@ -36,7 +36,7 @@ sys.path.insert(0, str(REPO / "tests"))     # the recorded fake estate client
 
 from fakes.estate import fetch_artifact                             # noqa: E402
 
-from cobol_xstate_core.fetch import fetch_dependencies              # noqa: E402
+from mainframe_artifacts.fetch import fetch_dependencies              # noqa: E402
 
 from jcl_dependencies.parser import parse_jcl                       # noqa: E402
 from jcl_dependencies.prefetch import prefetch_jcl                  # noqa: E402

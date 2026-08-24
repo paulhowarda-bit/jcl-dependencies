@@ -8,17 +8,17 @@ import sys
 from pathlib import Path
 from typing import List, Optional
 
-from cobol_xstate_core.artifact_service import decode_member, load_fetcher
-from cobol_xstate_core.bundle import open_bundle
-from cobol_xstate_core.cliargs import (add_logging_args, add_output_args,
+from mainframe_artifacts.artifact_service import decode_member, load_fetcher
+from mainframe_artifacts.bundle import open_bundle
+from mainframe_artifacts.cliargs import (add_logging_args, add_output_args,
                                        add_retrieval_args, jobs as _jobs)
-from cobol_xstate_core.detect import looks_like_jcl
-from cobol_xstate_core.errors import CobolXstateError
-from cobol_xstate_core.logging_setup import PACKAGE_LOGGER as CORE_LOGGER
-from cobol_xstate_core.logging_setup import configure_logging
-from cobol_xstate_core.output import make_run_dir, run_dir, write_json
-from cobol_xstate_core.profiling import StageTimer
-from cobol_xstate_core.report import report_stages
+from mainframe_artifacts.detect import looks_like_jcl
+from mainframe_artifacts.errors import CobolXstateError
+from mainframe_artifacts.logging_setup import PACKAGE_LOGGER as CORE_LOGGER
+from mainframe_artifacts.logging_setup import configure_logging
+from mainframe_artifacts.output import make_run_dir, run_dir, write_json
+from mainframe_artifacts.profiling import StageTimer
+from mainframe_artifacts.report import report_stages
 
 from . import PACKAGE_LOGGER
 from .api import analyze, gather
@@ -81,7 +81,7 @@ def _service(args, source_name: str):
 def run(argv: Optional[List[str]] = None, timing_sink=None) -> int:
     """Parse args, configure logging, and dispatch, behind the top-level error boundary."""
     args = build_parser().parse_args(argv)
-    # BOTH roots: retrieval logs from cobol_xstate_core.*, everything else from
+    # BOTH roots: retrieval logs from mainframe_artifacts.*, everything else from
     # jcl_dependencies.*. A root nobody configures propagates to the root logger, or
     # prints WARNING+ via logging's lastResort - which would end -qq's silence.
     configure_logging(verbose=args.verbose or (1 if args.debug else 0), quiet=args.quiet,

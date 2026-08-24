@@ -75,7 +75,7 @@ def test_gather_then_replay_reproduces_the_views(tmp_path):
 def test_python_dash_m_works():
     import os
     import subprocess
-    # PREPEND to the inherited PYTHONPATH rather than replacing it: cobol-xstate-core
+    # PREPEND to the inherited PYTHONPATH rather than replacing it: mainframe-artifacts
     # may be reaching this interpreter the same way, and the child needs it too.
     inherited = os.environ.get("PYTHONPATH", "")
     pypath = os.pathsep.join(p for p in (str(REPO / "src"), inherited) if p)

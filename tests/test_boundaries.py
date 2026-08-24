@@ -4,9 +4,9 @@ They are peers: the COBOL tools say what a program does, this one says what data
 does it to, and they meet at a plain manifest dict. Nothing about the source layout
 enforces that - a single stray import would erase it while every other test still passed,
 and the cost is not abstract: a JCL box would start carrying a COBOL modelling engine
-(``cobol_xstate``) or a COBOL parse front-end (``cobol_parse``, the mainframe-common
+(``cobol_xstate``) or a COBOL parse front-end (``cobol_parser``, the mainframe-common
 parser/ distribution) it never executes, and this repository could no longer be released
-on its own. A core+jcl install must be unable to find either package.
+on its own. An artifacts+jcl install must be unable to find either package.
 
 A note on how, because getting it wrong is easy and silent: ``sys.meta_path`` finders are
 consulted through ``find_spec``. ``find_module`` was REMOVED in Python 3.12, so a blocker
@@ -28,7 +28,7 @@ _PREAMBLE = textwrap.dedent("""
 
     class Blocker:
         def find_spec(self, name, path=None, target=None):
-            if name.split(".")[0] in ("cobol_xstate", "cobol_parse"):
+            if name.split(".")[0] in ("cobol_xstate", "cobol_parser"):
                 raise ImportError("BLOCKED " + name)
             return None
 
@@ -43,7 +43,7 @@ def _isolated(body):
                           capture_output=True, text=True)
 
 
-@pytest.mark.parametrize("package", ["cobol_xstate", "cobol_parse"])
+@pytest.mark.parametrize("package", ["cobol_xstate", "cobol_parser"])
 def test_the_blocker_actually_blocks(package):
     """Guard the guard. If this passes when it should not, everything below is vacuous."""
     proc = _isolated(f"import {package}")
@@ -107,7 +107,7 @@ def test_no_module_imports_the_cobol_package(module):
     for line in src.splitlines():
         s = line.strip()
         if s.startswith(("import ", "from ")):
-            for blocked in ("cobol_xstate", "cobol_parse"):
+            for blocked in ("cobol_xstate", "cobol_parser"):
                 assert (f"{blocked}." not in s
                         and s != f"import {blocked}"
                         and not s.startswith(f"from {blocked} ")), (

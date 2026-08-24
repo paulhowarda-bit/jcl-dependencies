@@ -23,7 +23,7 @@ from __future__ import annotations
 
 from typing import Callable, Iterable, List, Optional
 
-from cobol_xstate_core.prefetch import (PrefetchResult, Prefetcher,  # noqa: F401
+from mainframe_artifacts.prefetch import (PrefetchResult, Prefetcher,  # noqa: F401
                                         member_key)
 
 from .parser import parse_jcl

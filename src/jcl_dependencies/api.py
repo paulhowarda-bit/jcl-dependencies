@@ -11,10 +11,10 @@ import logging
 from dataclasses import dataclass, field
 from typing import Any, Dict, Optional, Sequence
 
-from cobol_xstate_core.bundle import EstateBundle, recording_fetcher, write_bundle
-from cobol_xstate_core.fetch import fetch_dependencies
-from cobol_xstate_core.prefetch import PrefetchResult
-from cobol_xstate_core.profiling import StageTimer
+from mainframe_artifacts.bundle import EstateBundle, recording_fetcher, write_bundle
+from mainframe_artifacts.fetch import fetch_dependencies
+from mainframe_artifacts.prefetch import PrefetchResult
+from mainframe_artifacts.profiling import StageTimer
 
 from .parser import Job, parse_jcl
 from .prefetch import prefetch_jcl
