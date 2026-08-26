@@ -7,10 +7,11 @@ cover them.
 
 Answers from a fixed table, so a run is reproducible on any machine with no network.
 The members cover what the JCL closure actually exercises: a cataloged PROC (whose
-steps exist in no other file), a control-card member requested as ``DSN(MEMBER)``, an
-INCLUDE member used by the shipped examples, a name the estate does not have, and a
-name whose REQUEST FAILS - which is not the same fact as absence and must never be
-reported as one.
+steps exist in no other file), a control-card member requested as ``DSN(MEMBER)``, TWO
+members of one library (which must retrieve separately, not collapse onto their shared
+DSN), an INCLUDE member used by the shipped examples, a name the estate does not have,
+and a name whose REQUEST FAILS - which is not the same fact as absence and must never
+be reported as one.
 """
 
 from __future__ import annotations
@@ -28,11 +29,20 @@ FINSTD = (
     "//FINSTEP  EXEC PGM=FINPOST\n"
     "//FINDD    DD DSN=PROD.FIN.DAILY,DISP=SHR\n"
 )
+# Two members of ONE library (cardlib.jcl reads one per step). They must answer
+# SEPARATELY: their whole point is that PARM.LIB(SORTNAME) and PARM.LIB(SORTZIP) are two
+# artifacts, so a retrieval that returned only one - or the same one twice - is the very
+# collapse the example exists to catch. Different sort fields, so the two are also
+# distinguishable in the field lineage the resolved cards produce.
+SORTNAME = "  SORT FIELDS=(6,20,CH,A)\n"
+SORTZIP = "  SORT FIELDS=(40,5,CH,A)\n"
 
 TABLE = {
     "PAYPROC": PAYPROC,
     "SORTCRD": SORTCRD,
     "FINSTD": FINSTD,
+    "SORTNAME": SORTNAME,
+    "SORTZIP": SORTZIP,
 }
 
 
