@@ -233,6 +233,41 @@ def test_temp_dataset_is_job_scoped_not_global():
     assert work["identity"] == "job-scoped" and work["temporary"] is True
 
 
+def test_two_members_of_one_card_library_are_two_artifacts():
+    """A control-card row was keyed on the DSN alone, so two steps reading two different
+    MEMBERS of one library collapsed into a single row: the second member vanished from
+    the manifest entirely, and the first was reported as read by a step that never read
+    it (stage 2 then never fetched the second either). For a control card the MEMBER is
+    the artifact - the library is only where it lives."""
+    job = parse_jcl(
+        "//J JOB\n"
+        "//STEP01 EXEC PGM=EZTPA00\n"
+        "//SYSIN DD DSN=PROD.EZTSRC(MEMBERA),DISP=SHR\n"
+        "//STEP02 EXEC PGM=EZTPA00\n"
+        "//SYSIN DD DSN=PROD.EZTSRC(MEMBERB),DISP=SHR\n")
+    cards = {a["artifact"]: a for a in build_jcl_artifacts(job)["artifacts"]
+             if a["kind"] == "control-card"}
+    assert sorted(cards) == ["PROD.EZTSRC(MEMBERA)", "PROD.EZTSRC(MEMBERB)"]
+    # ...and each row names ONLY the step that actually read it.
+    assert [t["step"] for t in cards["PROD.EZTSRC(MEMBERA)"]["touchedBy"]] == ["STEP01"]
+    assert [t["step"] for t in cards["PROD.EZTSRC(MEMBERB)"]["touchedBy"]] == ["STEP02"]
+
+
+def test_one_card_member_read_by_two_steps_stays_one_artifact():
+    """The converse of that collapse: keying on (DSN, MEMBER) must not over-split. One
+    member read by two steps is ONE artifact that both steps touch."""
+    job = parse_jcl(
+        "//J JOB\n"
+        "//STEP01 EXEC PGM=SORT\n"
+        "//SYSIN DD DSN=PARM.LIB(SORTCRD),DISP=SHR\n"
+        "//STEP02 EXEC PGM=SORT\n"
+        "//SYSIN DD DSN=PARM.LIB(SORTCRD),DISP=SHR\n")
+    cards = [a for a in build_jcl_artifacts(job)["artifacts"]
+             if a["kind"] == "control-card"]
+    assert len(cards) == 1
+    assert [t["step"] for t in cards[0]["touchedBy"]] == ["STEP01", "STEP02"]
+
+
 def test_sysout_and_dummy_are_excluded_with_reason():
     job = parse_jcl(
         "//J JOB\n//S EXEC PGM=P\n//RPT DD SYSOUT=*\n//SCR DD DUMMY\n")

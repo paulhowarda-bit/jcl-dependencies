@@ -308,12 +308,18 @@ def build_jcl_artifacts(job: Job) -> dict:
     the resolution chain still needed."""
     # datasets (keyed by DSN base), aggregating direction + which steps/DDs touch them
     ds: Dict[str, dict] = {}
-    control_members: Dict[str, dict] = {}
+    # Keyed on (DSN, MEMBER) - NOT the DSN alone. For a control card the MEMBER is the
+    # artifact: PARM.LIB(SORTA) and PARM.LIB(SORTB) are two different parameter files
+    # that merely share a library. Keying on the library would collapse them into one
+    # row, dropping the second member from the manifest entirely and crediting the first
+    # with a step that never read it - and stage 2 would then never fetch the second.
+    # (Plain datasets below stay keyed on the DSN: there the library IS the identity.)
+    control_members: Dict[Tuple[str, Optional[str]], dict] = {}
     for step, dd, seg, io in _dd_rows(job):
         # a control-card DATASET (SYSIN DD DSN=...): a parameter file, not plain data
         is_card_dd = dd.ddname in ("SYSIN", "TOOLIN", "SYSTSIN", "DFSPARM")
         if seg is not None and is_card_dd:
-            rec = control_members.setdefault(seg.dsn, {
+            rec = control_members.setdefault((seg.dsn, seg.member), {
                 "artifact": seg.dsn + (f"({seg.member})" if seg.member else ""),
                 "kind": "control-card", "dependency": "runtime", "io": "read",
                 "identity": "global", "touchedBy": []})
