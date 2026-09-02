@@ -49,9 +49,38 @@ from jcl_dependencies import analyze
 
 job = analyze(open("job.jcl").read(), source_name="job.jcl", retrieve=False)
 job.lineage()      # step-to-step dataset dataflow + control-card field lineage
-job.artifacts()    # every dataset, program, PROC, INCLUDE member and control card
+job.artifacts()    # every dataset, program, PROC, INCLUDE member, control card, Db2 table
 job.bind(manifest) # close a COBOL program's ddname -> dataset join
 ```
+
+## Db2 steps: the tables are in the control cards
+
+A job's Db2 dependencies are never on the `EXEC`. `PGM=DSNUTILB` says only "a Db2
+utility"; its SYSIN says `LOAD DATA ... INTO TABLE T` (writes T from `INDDN`, default
+`SYSREC`) or `UNLOAD ... FROM TABLE T` (reads T into `UNLDDN`), or works on a
+`TABLESPACE`, which is a different identity and is reported apart (`db2-tablespace`).
+`PGM=IKJEFT01` says even less: the program the step actually runs is the `RUN
+PROGRAM(p) PLAN(q)` in SYSTSIN, and when that program is `DSNTIAUL`/`DSNTEP2` the
+step's SYSIN is SQL whose `FROM`/`JOIN`/`INSERT INTO`/`UPDATE`/`DELETE FROM` name the
+tables. Each becomes a `db2-table` row (`io` read / write / read+write, `touchedBy`
+step, DD and operation) and, in the lineage view, a `fieldLineage` entry that ties the
+table to the dataset the DD binds. A program run under DSN is a `program` row with
+`runVia: "TSO/DSN"` and its `plans`. The column list is not known here and is not
+pretended; nor is the SQL parsed beyond its table references.
+
+A table written under a Db2 **ALIAS or SYNONYM** is reported as written - the join to
+the base table lives only in the catalog, so it is never guessed. Supply it and the row
+gains `baseTable` and `resolvedVia`:
+
+```bash
+jcl-dependencies job.jcl --synonym-map synonyms.json            # a {"ALIAS": "TABLE"} file
+jcl-dependencies job.jcl --synonym-resolver mycatalog:resolve    # FUNC(name) -> table | None
+```
+
+Both flags come from `mainframe_artifacts.cliargs.add_synonym_args`, shared with the
+COBOL and Easytrieve front-ends; the map answers first, the resolver answers what the map
+does not hold, and a resolver that raises is a flagged failed lookup, never "not a
+synonym". In Python: `analyze(src, synonyms=..., synonym_resolver=...)`.
 
 ## What it follows, and what it does not
 

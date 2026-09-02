@@ -20,6 +20,8 @@ from __future__ import annotations
 
 from typing import Dict, List, Optional, Tuple
 
+from mainframe_artifacts.synonyms import FROM_MAP, SynonymLookup
+
 from .parser import DD, DDSegment, Job, Step, _dd_direction
 
 
@@ -109,19 +111,50 @@ def _field_lineage(step: Step) -> Optional[dict]:
     fields out consecutively in the output record so each carries its output byte range as
     well as the input range it copies from."""
     control = None
+    controls: List[dict] = []
     in_dd = out_dd = None
     for dd in step.dds:
         if dd.control:
             control = dd.control
+            controls.append(dd.control)
+    if not control:
+        return None
     # SORT: SORTIN -> SORTOUT (or the concatenated inputs). IDCAMS REPRO: inDD -> outDD.
+    # Not for a Db2 step: DSNUTILB's SYSUT1 / SORTOUT are LOAD's sort WORK files, and
+    # reading them as the step's input and output would draw a dataflow that is not
+    # there - the table rows below say where the data actually goes.
+    db2_step = any(c.get(k) for c in controls for k in ("tables", "tablespaces", "runs"))
     for dd in step.dds:
+        if db2_step:
+            break
         if dd.ddname in ("SORTIN", "SYSUT1"):
             in_dd = dd
         if dd.ddname in ("SORTOUT", "SYSUT2"):
             out_dd = dd
-    if not control:
-        return None
-    result: dict = {"step": step.name, "utility": control.get("utility")}
+    # A TSO step carries TWO card DDs - SYSTSIN (the DSN commands) and SYSIN (what the
+    # program run under DSN reads) - so the Db2 facts are merged across every card DD
+    # of the step, and the utility names each source in DD order.
+    utilities = list(dict.fromkeys(c.get("utility") for c in controls if c.get("utility")))
+    result: dict = {"step": step.name,
+                    "utility": " + ".join(utilities) if len(utilities) > 1
+                    else control.get("utility")}
+    by_dd = {dd.ddname: dd for dd in step.dds}
+    tables: List[dict] = []
+    for c in controls:
+        for t in c.get("tables") or []:
+            row = dict(t)
+            dd = by_dd.get(t.get("ddname") or "")
+            ds = _dd_dataset(dd) if dd else None
+            if ds and ds.dsn:
+                row["dataset"] = ds.dsn   # LOAD reads it into the table; UNLOAD fills it
+            tables.append(row)
+    if tables:
+        result["tables"] = tables
+    for key in ("subsystem", "runs", "tablespaces"):
+        vals = [c[key] for c in controls if c.get(key)]
+        if vals:
+            result[key] = vals[0] if key == "subsystem" else [
+                x for v in vals for x in v]
     si = _dd_dataset(in_dd) if in_dd else None
     so = _dd_dataset(out_dd) if out_dd else None
     if si:
@@ -302,10 +335,17 @@ def _io_from_dirs(dirs: set) -> str:
     return "read" if r else "write"
 
 
-def build_jcl_artifacts(job: Job) -> dict:
+def build_jcl_artifacts(job: Job, *, synonyms: Optional[SynonymLookup] = None) -> dict:
     """The related-artifact manifest for a JCL job, mirroring the COBOL manifest: datasets,
     programs, PROCs, control-card and INCLUDE members, each with dependency/identity and
-    the resolution chain still needed."""
+    the resolution chain still needed - and the Db2 tables and tablespaces the job's
+    utility / DSN / SQL control cards name, plus the programs a TSO step RUNs.
+
+    ``synonyms`` is the Db2 catalog's SYNONYM/ALIAS knowledge, supplied as input
+    (``mainframe_artifacts.synonyms.SynonymLookup``: a map, a host resolver, or both).
+    Every ``db2-table`` row is asked of it - a LOAD ``INTO TABLE`` written under an alias
+    names the alias, and only the catalog knows which table that is - and a row written
+    under a synonym gains ``baseTable``. The name as written stays the artifact."""
     # datasets (keyed by DSN base), aggregating direction + which steps/DDs touch them
     ds: Dict[str, dict] = {}
     # Keyed on (DSN, MEMBER) - NOT the DSN alone. For a control card the MEMBER is the
@@ -370,6 +410,64 @@ def build_jcl_artifacts(job: Job) -> dict:
 
     artifacts.extend(control_members.values())
 
+    # Db2 tables and tablespaces named by utility / SQL control cards. A table is the
+    # catalog's identity, global like a DSN; which steps LOAD, UNLOAD or SQL it is the
+    # dependency. The column list is NOT known here and is not pretended.
+    tables: Dict[str, dict] = {}
+    spaces: Dict[str, dict] = {}
+    runs: Dict[str, dict] = {}
+    for step in job.steps:
+        for dd in step.dds:
+            ctl = dd.control or {}
+            for t in ctl.get("tables") or []:
+                rec = tables.setdefault(t["table"], {"_io": set(), "touchedBy": []})
+                rec["_io"].add(t["io"])
+                rec["touchedBy"].append({"step": step.name, "ddname": dd.ddname,
+                                         "op": t["op"]})
+            for s in ctl.get("tablespaces") or []:
+                rec = spaces.setdefault(s["tablespace"], {"touchedBy": []})
+                rec["touchedBy"].append({"step": step.name, "ddname": dd.ddname,
+                                         "op": s["op"]})
+            for r in ctl.get("runs") or []:
+                rec = runs.setdefault(r["program"], {"steps": [], "plans": []})
+                rec["steps"].append(step.name)
+                if r.get("plan") and r["plan"] not in rec["plans"]:
+                    rec["plans"].append(r["plan"])
+    catalog_flags: List[str] = []
+    for name in sorted(tables):
+        rec = tables[name]
+        io = rec["_io"]
+        row = {
+            "artifact": name, "kind": "db2-table", "dependency": "runtime",
+            "identity": "global",
+            "io": "read+write" if len(io) > 1 else next(iter(io)),
+            "resolvedBy": "the Db2 catalog (DDL / DCLGEN)",
+            "needs": ("the table's DDL or DCLGEN for its columns; this job's control cards "
+                      "name the table, not which columns they touch. Written under a Db2 "
+                      "ALIAS or SYNONYM the name is the alias - the base table is catalog "
+                      "knowledge, supplied through --synonym-map / --synonym-resolver"),
+            "touchedBy": rec["touchedBy"],
+        }
+        hit = synonyms(name) if synonyms is not None else None
+        if hit is not None:
+            base, door = hit
+            row["baseTable"] = base
+            row["resolvedVia"] = "synonym map" if door == FROM_MAP else "catalog resolver"
+        artifacts.append(row)
+    if synonyms is not None and synonyms.disabled_reason:
+        catalog_flags.append(
+            f"synonym resolver failed mid-run ({synonyms.disabled_reason}); synonyms it "
+            f"did not reach stay unresolved - fix the resolver and re-run")
+    for name in sorted(spaces):
+        artifacts.append({
+            "artifact": name, "kind": "db2-tablespace", "dependency": "runtime",
+            "identity": "global",
+            "resolvedBy": "the Db2 catalog (SYSIBM.SYSTABLESPACE)",
+            "needs": ("the catalog, for which tables live in this tablespace; a REORG / "
+                      "RUNSTATS / COPY / CHECK works on the space, not on a named table"),
+            "touchedBy": spaces[name]["touchedBy"],
+        })
+
     # programs EXECed
     seen_prog: Dict[str, dict] = {}
     for step in job.steps:
@@ -383,6 +481,22 @@ def build_jcl_artifacts(job: Job) -> dict:
                       "module; a utility name (SORT/IDCAMS) resolves to the installed "
                       "utility")})
         row["steps"].append(step.name)
+    # programs RUN under DSN by a TSO step: the EXEC named IKJEFT01, the SYSTSIN named
+    # the program that actually does the work - that one is the dependency.
+    for name in sorted(runs):
+        rec = runs[name]
+        row = seen_prog.setdefault(name, {
+            "artifact": name, "kind": "program", "dependency": "runtime",
+            "identity": "global", "steps": [],
+            "resolvedBy": "DSN RUN PROGRAM - the LIB() on the command, else STEPLIB/JOBLIB",
+            "needs": ("the load library that provides this module, and its Db2 PLAN "
+                      "bound in the subsystem the step connected to")})
+        row["runVia"] = "TSO/DSN"
+        if rec["plans"]:
+            row["plans"] = rec["plans"]
+        for s in rec["steps"]:
+            if s not in row["steps"]:
+                row["steps"].append(s)
     artifacts.extend(seen_prog.values())
 
     # PROCs invoked (compile-time: assembled into the job before it runs, like a copybook)
@@ -425,8 +539,8 @@ def build_jcl_artifacts(job: Job) -> dict:
             excluded.append({"name": dd.ddname, "kind": "dummy",
                              "reason": "DUMMY - no dataset"})
 
-    _CLASS_ORDER = {"dataset": 0, "control-card": 1, "program": 2, "proc": 3,
-                    "include-member": 4}
+    _CLASS_ORDER = {"dataset": 0, "control-card": 1, "db2-table": 2, "db2-tablespace": 3,
+                    "program": 4, "proc": 5, "include-member": 6}
     artifacts.sort(key=lambda r: (_CLASS_ORDER.get(r["kind"], 9), r["artifact"]))
 
     return {
@@ -446,7 +560,7 @@ def build_jcl_artifacts(job: Job) -> dict:
         ),
         "artifacts": artifacts,
         "excluded": excluded,
-        "flags": list(job.flags),
+        "flags": list(job.flags) + catalog_flags,
     }
 
 

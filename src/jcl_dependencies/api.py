@@ -9,12 +9,13 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from typing import Any, Dict, Optional, Sequence
+from typing import Any, Callable, Dict, Optional, Sequence
 
 from mainframe_artifacts.bundle import EstateBundle, recording_fetcher, write_bundle
 from mainframe_artifacts.fetch import fetch_dependencies
 from mainframe_artifacts.prefetch import PrefetchResult
 from mainframe_artifacts.profiling import StageTimer
+from mainframe_artifacts.synonyms import SynonymLookup
 
 from .parser import Job, parse_jcl
 from .prefetch import prefetch_jcl
@@ -31,6 +32,9 @@ class JobAnalysis:
     prefetch: PrefetchResult
     source_name: str = "<jcl>"
     fetch: Optional[dict] = None
+    #: Db2 SYNONYM/ALIAS knowledge (a map, a host resolver, or both) - None when the
+    #: run opened neither door, and then every table is reported as written.
+    synonyms: Optional[SynonymLookup] = None
 
     _lineage: Optional[dict] = field(default=None, repr=False)
     _artifacts: Optional[dict] = field(default=None, repr=False)
@@ -42,9 +46,10 @@ class JobAnalysis:
         return self._lineage
 
     def artifacts(self) -> dict:
-        """Every dataset, program, PROC, INCLUDE member and control card this job names."""
+        """Every dataset, program, PROC, INCLUDE member, control card, and Db2 table this
+        job names."""
         if self._artifacts is None:
-            self._artifacts = build_jcl_artifacts(self.job)
+            self._artifacts = build_jcl_artifacts(self.job, synonyms=self.synonyms)
         return self._artifacts
 
     def bind(self, cobol_manifest: dict) -> dict:
@@ -62,8 +67,18 @@ def analyze(source: str, *, source_name: str = "<jcl>",
             paths: Sequence[str] = (), dest: Optional[str] = None,
             unavailable: Optional[str] = None,
             max_rounds: int = 12, jobs: int = 1,
-            timer: Optional[StageTimer] = None) -> JobAnalysis:
+            timer: Optional[StageTimer] = None,
+            synonyms: Optional[Dict[str, str]] = None,
+            synonym_resolver: Optional[Callable[[str], Optional[str]]] = None,
+            ) -> JobAnalysis:
     """Retrieve, parse and model one JCL job or PROC.
+
+    ``synonyms`` (a ``{"SYNONYM": "BASE"}`` map) and ``synonym_resolver`` (a
+    ``(name) -> base | None`` callable the host supplies, see
+    ``mainframe_artifacts.protocol.SynonymResolver``) are the two doors Db2 catalog
+    knowledge arrives by; the map answers first. With either open, a ``db2-table``
+    artifact row written under an alias also names its base table. Neither is a
+    default: a table stays as written, never guessed.
 
     Stage 1 is not optional decoration here. A cataloged PROC, an INCLUDE member and a
     control-card dataset each carry ``EXEC PGM=`` steps and DD statements that appear
@@ -91,7 +106,10 @@ def analyze(source: str, *, source_name: str = "<jcl>",
     with timer.stage("parse"):
         job = parse_jcl(source, resolver=pre.resolver(), source_name=source_name)
 
-    analysis = JobAnalysis(job=job, prefetch=pre, source_name=source_name)
+    lookup = (SynonymLookup(synonyms, synonym_resolver)
+              if (synonyms or synonym_resolver is not None) else None)
+    analysis = JobAnalysis(job=job, prefetch=pre, source_name=source_name,
+                           synonyms=lookup)
     with timer.stage("jcl-lineage"):
         analysis.lineage()
     with timer.stage("jcl-artifacts"):

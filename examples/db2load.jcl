@@ -1,0 +1,45 @@
+//DB2LOAD  JOB (ACCT),'DB2 LOAD AND UNLOAD',CLASS=A,MSGCLASS=X
+//*
+//* The Db2 utility driver names the TABLES a job moves data into and out of,
+//* and it names them in its SYSIN, not on the EXEC. STEP01 LOADs the sorted
+//* extract into a table written under its ALIAS (ACCT_DAILY is an alias of
+//* the real table; only the Db2 catalog knows which), STEP02 UNLOADs a
+//* table into a new generation, STEP03 works on a tablespace, not a table.
+//*
+//         SET HLQ=PROD
+//*
+//STEP01   EXEC PGM=DSNUTILB,PARM='DB2P,LOADACCT'
+//STEPLIB  DD  DSN=DB2P.SDSNLOAD,DISP=SHR
+//SYSREC   DD  DSN=&HLQ..ACCT.SORTED,DISP=SHR
+//SYSUT1   DD  DSN=&&SYSUT1,UNIT=SYSDA,SPACE=(CYL,(10,5))
+//SORTOUT  DD  DSN=&&SORTOUT,UNIT=SYSDA,SPACE=(CYL,(10,5))
+//SYSPRINT DD  SYSOUT=*
+//SYSIN    DD  *
+  LOAD DATA INDDN SYSREC RESUME YES LOG NO
+    -- the alias, exactly as the estate writes it
+    INTO TABLE ACCT_DAILY
+      (ACCT_ID   POSITION(1:9)   CHAR(9),
+       ACCT_NAME POSITION(10:29) CHAR(20),
+       BALANCE   POSITION(30:37) DECIMAL EXTERNAL)
+/*
+//*
+//STEP02   EXEC PGM=DSNUTILB,PARM='DB2P,UNLDPOSN'
+//STEPLIB  DD  DSN=DB2P.SDSNLOAD,DISP=SHR
+//SYSREC   DD  DSN=&HLQ..POSN.UNLOAD(+1),
+//             DISP=(NEW,CATLG,DELETE),
+//             SPACE=(CYL,(20,10),RLSE)
+//SYSPUNCH DD  DSN=&HLQ..POSN.CNTL,DISP=(NEW,CATLG,DELETE),
+//             SPACE=(TRK,(1,1),RLSE)
+//SYSPRINT DD  SYSOUT=*
+//SYSIN    DD  *
+  UNLOAD TABLESPACE DBPOSN.TSPOSN
+    FROM TABLE POSN_MASTER
+/*
+//*
+//STEP03   EXEC PGM=DSNUTILB,PARM='DB2P,STATS'
+//STEPLIB  DD  DSN=DB2P.SDSNLOAD,DISP=SHR
+//SYSPRINT DD  SYSOUT=*
+//SYSIN    DD  *
+  RUNSTATS TABLESPACE DBPOSN.TSPOSN TABLE(ALL) INDEX(ALL)
+/*
+//

@@ -400,21 +400,253 @@ def _parse_cond(text: str) -> dict:
 # --------------------------------------------------------------------------- #
 
 _SORT_UTILS = ("SORT", "MERGE", "ICEMAN", "DFSORT", "SYNCSORT")
+#: The Db2 utility driver: its SYSIN is utility control statements (LOAD, UNLOAD, REORG,
+#: RUNSTATS ...), and LOAD / UNLOAD name the TABLES a job moves data into and out of.
+_DB2_UTILS = ("DSNUTILB", "DSNUTILS", "DSNUTILU")
+#: The TSO batch monitor. Its SYSTSIN carries the DSN command processor's commands, and
+#: `RUN PROGRAM(x) PLAN(y)` is where the program a step REALLY runs is named - the EXEC
+#: says IKJEFT01, which is never the dependency anyone is looking for.
+_TSO_PGMS = ("IKJEFT01", "IKJEFT1A", "IKJEFT1B")
+#: Db2's sample SQL processors: run under DSN, they read SQL statements from SYSIN.
+_DB2_SQL_PGMS = ("DSNTEP2", "DSNTEP4", "DSNTIAUL", "DSNTIAD")
+_SQL_SNIFF = re.compile(r"\b(?:SELECT|INSERT\s+INTO|UPDATE|DELETE\s+FROM|MERGE\s+INTO|"
+                        r"CREATE|DROP|ALTER|LOCK\s+TABLE|TRUNCATE)\b")
 
 
-def _classify_utility(pgm: Optional[str], lines: List[str]) -> Optional[str]:
+def _classify_utility(pgm: Optional[str], lines: List[str],
+                      ddname: Optional[str] = None) -> Optional[str]:
     body = " ".join(lines).upper()
-    if pgm and pgm.upper() in ("IDCAMS",):
+    up = (pgm or "").upper()
+    if up in ("IDCAMS",):
         return "idcams"
-    if pgm and pgm.upper() in _SORT_UTILS:
+    if up in _SORT_UTILS:
         return "sort"
-    if pgm and pgm.upper() in ("IEBGENER", "ICEGENER"):
+    if up in ("IEBGENER", "ICEGENER"):
         return "iebgener"
+    if up in _DB2_UTILS:
+        return "db2util"
+    if up in _TSO_PGMS:
+        # SYSTSIN is the TSO command stream. SYSIN is whatever the program RUN under DSN
+        # reads - SQL for DSNTEP2/DSNTIAUL, its own input for anything else - so it is
+        # read as SQL only when it looks like SQL, never on the strength of the EXEC.
+        if ddname == "SYSTSIN":
+            return "tso"
+        return "sql" if _SQL_SNIFF.search(body) else "data"
+    if up in _DB2_SQL_PGMS:
+        return "sql"
     if re.search(r"\bREPRO\b|\bDEFINE\s+CLUSTER\b|\bDELETE\b", body):
         return "idcams"
     if re.search(r"\bSORT\s+FIELDS\b|\bMERGE\s+FIELDS\b|\bOUTREC\b|\bINREC\b", body):
         return "sort"
+    if re.search(r"\bINTO\s+TABLE\b|\bFROM\s+TABLE\b|"
+                 r"\b(?:REORG|RUNSTATS|COPY|CHECK\s+DATA|QUIESCE)\s+TABLESPACE\b", body):
+        return "db2util"
+    if re.search(r"\bDSN\s+SYSTEM\s*\(|\bRUN\s+PROGRAM\s*\(", body):
+        return "tso"
     return None
+
+
+# --------------------------------------------------------------------------- #
+# Db2: utility statements, DSN commands, SQL - the TABLES a job depends on
+# --------------------------------------------------------------------------- #
+
+_DB2_NAME = r"[A-Z0-9_$#@]+(?:\.[A-Z0-9_$#@]+){0,2}"
+_DB2_UTIL_VERBS = ("LOAD", "UNLOAD", "REORG", "RUNSTATS", "COPY", "MERGECOPY", "CHECK",
+                   "RECOVER", "REBUILD", "MODIFY", "QUIESCE", "REPORT", "EXEC")
+#: Words that can follow FROM / JOIN / INTO / UPDATE without being a table name.
+_NOT_A_TABLE = {"SELECT", "TABLE", "FINAL", "OLD", "NEW", "LATERAL", "XMLTABLE", "UNNEST",
+                "OF", "SET", "WHERE", "VALUES", "ONLY", "(", ")"}
+
+
+def _strip_sql_comments(lines: List[str]) -> List[str]:
+    return [re.sub(r"--.*$", "", ln) for ln in lines]
+
+
+def _sql_table_refs(text: str) -> List[dict]:
+    """The tables SQL statements name, with the operation and whether it reads or writes.
+
+    Deliberately shallow - standard SQL keywords, not a grammar: FROM / JOIN read,
+    INSERT INTO / UPDATE / DELETE FROM / MERGE INTO / TRUNCATE write, DDL is ``ddl``. A
+    subselect's ``FROM (`` and ``FROM TABLE(`` / ``FROM FINAL TABLE`` name no table and
+    are skipped; a correlation name after the table is ignored. What this cannot see is
+    the column list, and it does not pretend to.
+    """
+    out: List[dict] = []
+    seen = set()
+
+    def add(op: str, table: str, io: str) -> None:
+        if not table or table.upper() in _NOT_A_TABLE:
+            return
+        key = (op, table)
+        if key not in seen:
+            seen.add(key)
+            out.append({"op": op, "table": table, "io": io})
+
+    for stmt in text.upper().split(";"):
+        toks = re.findall(r"[A-Z0-9_$#@.]+|\(|\)|:", stmt)
+        if not toks:
+            continue
+        verb = toks[0]
+        i = 0
+        while i < len(toks):
+            w = toks[i]
+            nxt = toks[i + 1] if i + 1 < len(toks) else ""
+            nxt2 = toks[i + 2] if i + 2 < len(toks) else ""
+            if w == "INSERT" and nxt == "INTO":
+                add("INSERT", nxt2, "write")
+                i += 3
+                continue
+            if w == "MERGE" and nxt == "INTO":
+                add("MERGE", nxt2, "write")
+                i += 3
+                continue
+            if w == "DELETE" and nxt == "FROM":
+                add("DELETE", nxt2, "write")
+                i += 3
+                continue
+            if w == "UPDATE" and nxt not in _NOT_A_TABLE and nxt:
+                add("UPDATE", nxt, "write")
+                i += 2
+                continue
+            if w == "TRUNCATE":
+                add("TRUNCATE", nxt2 if nxt == "TABLE" else nxt, "write")
+                i += 2
+                continue
+            if w in ("CREATE", "DROP", "ALTER") and nxt == "TABLE":
+                add(w, nxt2, "ddl")
+                i += 3
+                continue
+            if w == "LOCK" and nxt == "TABLE":
+                add("LOCK", nxt2, "read")
+                i += 3
+                continue
+            if w in ("FROM", "JOIN", "USING"):      # USING: MERGE's source table
+                add(verb, nxt, "read")
+                i += 2
+                continue
+            i += 1
+    return out
+
+
+def _parse_db2_utility_cards(lines: List[str]) -> dict:
+    """DSNUTILB control statements -> the tables and tablespaces each one touches.
+
+    ``LOAD ... INTO TABLE t`` writes t from INDDN (default SYSREC); ``UNLOAD ... FROM
+    TABLE t`` reads t into UNLDDN (default SYSREC); an embedded ``EXEC SQL ... ENDEXEC``
+    is read as SQL. REORG / RUNSTATS / COPY / CHECK / QUIESCE and friends work on a
+    TABLESPACE - a different identity, reported apart - and RUNSTATS' ``TABLE(t)`` names
+    a table it reads. A name written under a Db2 ALIAS or SYNONYM stays as written here;
+    the catalog's synonym knowledge, when the host supplies it, is applied by the
+    artifacts view.
+    """
+    body = " ".join(_strip_sql_comments(lines)).upper()
+    summary: dict = {"utility": "DB2 utility"}
+    tables: List[dict] = []
+    spaces: List[dict] = []
+    seen_t, seen_s = set(), set()
+
+    def add_table(op: str, table: str, io: str, ddname: Optional[str] = None) -> None:
+        key = (op, table, ddname)
+        if key in seen_t:
+            return
+        seen_t.add(key)
+        row = {"op": op, "table": table, "io": io}
+        if ddname:
+            row["ddname"] = ddname
+        tables.append(row)
+
+    def add_space(op: str, space: str) -> None:
+        if (op, space) not in seen_s:
+            seen_s.add((op, space))
+            spaces.append({"op": op, "tablespace": space})
+
+    verbs = "|".join(_DB2_UTIL_VERBS)
+    parts = [p for p in re.split(rf"(?=\b(?:{verbs})\b)", body) if p.strip()]
+    for seg in parts:
+        verb = seg.split(None, 1)[0]
+        if verb == "EXEC":
+            sql = re.sub(r"^\s*EXEC\s+SQL\b", "", seg, flags=re.I)
+            sql = re.sub(r"\bENDEXEC\b.*$", "", sql, flags=re.I | re.S)
+            for ref in _sql_table_refs(sql):
+                add_table(ref["op"], ref["table"], ref["io"])
+            continue
+        if verb == "LOAD":
+            m = re.search(r"\bINDDN\s*\(?\s*([A-Z0-9#@$]+)", seg)
+            ddname = m.group(1) if m else "SYSREC"
+            for t in re.findall(rf"\bINTO\s+TABLE\s+({_DB2_NAME})", seg):
+                add_table("LOAD", t, "write", ddname)
+            continue
+        if verb == "UNLOAD":
+            m = re.search(r"\bUNLDDN\s*\(?\s*([A-Z0-9#@$]+)", seg)
+            ddname = m.group(1) if m else "SYSREC"
+            found = re.findall(rf"\bFROM\s+TABLE\s+({_DB2_NAME})", seg)
+            for t in found:
+                add_table("UNLOAD", t, "read", ddname)
+            m = re.search(rf"\bTABLESPACE\s+({_DB2_NAME})", seg)
+            if m and not found:
+                add_space("UNLOAD", m.group(1))
+            continue
+        for m in re.finditer(rf"\bTABLESPACE\s+({_DB2_NAME})", seg):
+            if m.group(1) != "LIST":
+                add_space(verb, m.group(1))
+        for m in re.finditer(rf"\bTABLE\s*\(\s*({_DB2_NAME})\s*\)", seg):
+            if m.group(1) != "ALL":
+                add_table(verb, m.group(1), "read")
+    if tables:
+        summary["tables"] = tables
+    if spaces:
+        summary["tablespaces"] = spaces
+    if not tables and not spaces:
+        summary["note"] = "no LOAD/UNLOAD table or TABLESPACE operand was recognised"
+    return summary
+
+
+def _parse_tso_cards(lines: List[str]) -> dict:
+    """SYSTSIN under IKJEFT01: the DSN subsystem and every ``RUN PROGRAM(p) PLAN(q)``.
+
+    A TSO command continues on the next line when it ends in ``-`` or ``+``; the
+    continuation is joined before the command is read."""
+    joined: List[str] = []
+    for ln in lines:
+        s = ln.strip()
+        if joined and joined[-1].endswith(("-", "+")):
+            joined[-1] = joined[-1][:-1].rstrip() + " " + s
+        else:
+            joined.append(s)
+    summary: dict = {"utility": "TSO/DSN"}
+    runs: List[dict] = []
+    for cmd in joined:
+        up = cmd.upper()
+        m = re.search(r"\bDSN\b.*?\bSYSTEM\s*\(\s*([A-Z0-9#@$]+)", up)
+        if m:
+            summary["subsystem"] = m.group(1)
+            continue
+        m = re.search(r"\bRUN\b.*?\bPROGRAM\s*\(\s*([A-Z0-9#@$]+)", up)
+        if m:
+            run = {"program": m.group(1)}
+            pm = re.search(r"\bPLAN\s*\(\s*([A-Z0-9#@$]+)", up)
+            if pm:
+                run["plan"] = pm.group(1)
+            lm = re.search(r"\bLIB\s*\(\s*'?([A-Z0-9#@$.]+)", up)
+            if lm:
+                run["lib"] = lm.group(1)
+            runs.append(run)
+    if runs:
+        summary["runs"] = runs
+    if "subsystem" not in summary and not runs:
+        summary = {"utility": "TSO", "commandCount": len(joined)}
+    return summary
+
+
+def _parse_sql_cards(lines: List[str]) -> dict:
+    """SYSIN read as SQL (DSNTEP2 / DSNTIAUL / DSNTIAD under DSN): the tables named."""
+    text = "\n".join(_strip_sql_comments(lines))
+    stmts = [s for s in text.split(";") if s.strip()]
+    summary: dict = {"utility": "SQL", "statementCount": len(stmts)}
+    refs = _sql_table_refs(text)
+    if refs:
+        summary["tables"] = refs
+    return summary
 
 
 
@@ -518,15 +750,24 @@ def _parse_idcams_cards(lines: List[str]) -> dict:
     return summary
 
 
-def _parse_control_cards(pgm: Optional[str], lines: List[str]) -> Optional[dict]:
+def _parse_control_cards(pgm: Optional[str], lines: List[str],
+                         ddname: Optional[str] = None) -> Optional[dict]:
     lines = [ln for ln in lines if ln.strip() and not ln.lstrip().startswith("*")]
     if not lines:
         return None
-    util = _classify_utility(pgm, lines)
+    util = _classify_utility(pgm, lines, ddname)
+    if util == "data":
+        return None          # a program's own SYSIN input, not anybody's control cards
     if util == "sort":
         return _parse_sort_cards(lines)
     if util == "idcams":
         return _parse_idcams_cards(lines)
+    if util == "db2util":
+        return _parse_db2_utility_cards(lines)
+    if util == "tso":
+        return _parse_tso_cards(lines)
+    if util == "sql":
+        return _parse_sql_cards(lines)
     if util == "iebgener":
         return {"utility": "IEBGENER",
                 "note": "SYSUT1 -> SYSUT2 copy" + (
@@ -646,7 +887,7 @@ class _Parser:
                         if got is not None:
                             lines = got.splitlines()
                 if lines:
-                    ctl = _parse_control_cards(step.pgm, lines)
+                    ctl = _parse_control_cards(step.pgm, lines, dd.ddname)
                     if ctl:
                         dd.control = ctl
 
