@@ -295,6 +295,9 @@ def build_jcl_lineage(job: Job) -> dict:
     return {
         "format": "jcl-dependencies-lineage",
         "job": job.name,
+        # An empty `job` is not a usable signal on its own: an INCLUDE member and a JCL
+        # fragment also have no JOB card. State it.
+        "isProc": job.is_proc,
         "source": job.source_name,
         "note": (
             "Job-level dataflow. Each step lists its inputs and outputs (DDs resolved to "
@@ -546,6 +549,7 @@ def build_jcl_artifacts(job: Job, *, synonyms: Optional[SynonymLookup] = None) -
     return {
         "format": "jcl-dependencies-artifacts",
         "job": job.name,
+        "isProc": job.is_proc,
         "source": job.source_name,
         "note": (
             "One row per artifact this job is related to: datasets (dependency: runtime), "

@@ -856,6 +856,12 @@ class _Parser:
         # A bare PROC member (a .prc that only DEFINES a PROC, never EXECs it): analyse its
         # body directly, expanded with its own defaults, so the member is not empty.
         if self.job.is_proc and not self.job.steps and self.job.procs:
+            # Say so. The expansion uses PROC defaults ONLY - no invoking job's SET, no EXEC
+            # overrides - so every DSN below is a default that a real invocation may replace.
+            self.job.flags.append(
+                f"PROC ({', '.join(self.job.procs)}): expanded from its own defaults only - "
+                f"this member is a PROC, not a job, and no invoking job's SET or EXEC "
+                f"overrides are applied")
             for pname in list(self.job.procs):
                 self.job.steps.extend(self._expand_proc(pname, pname, {}, None))
         self._attach_control_cards()

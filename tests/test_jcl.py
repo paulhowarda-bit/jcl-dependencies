@@ -369,6 +369,52 @@ def test_bare_proc_member_is_analysed_with_its_defaults():
     assert step.from_proc == "EDVALID" and step.pgm == "EDCHECK"
     cardin = next(dd for dd in step.dds if dd.ddname == "CARDIN")
     assert cardin.segments[0].dsn == "TEST.EDIT.CARDS"    # &ENV -> TEST (the default)
+    assert any("not a job" in f for f in job.flags)       # ... and says those DSNs are defaults
+
+
+# --------------------------------------------------------------------------- #
+# a bare PROC member says so: the defaults-only flag and the isProc field
+# --------------------------------------------------------------------------- #
+
+def test_bare_proc_member_flags_that_it_is_a_proc_not_a_job():
+    """The standalone expansion uses the PROC's own defaults - no invoking job's SET, no EXEC
+    overrides - so every DSN it produces is a default a real invocation may replace. Say so:
+    an empty job name is an inference from an absence, not an assertion."""
+    job = parse_jcl("//PAYPRC PROC ENV=TEST\n"
+                    "//RUN EXEC PGM=PAYCALC\n"
+                    "//IN  DD DSN=&ENV..PAY.IN,DISP=SHR\n"
+                    "//    PEND\n")
+    assert job.is_proc is True and job.name == ""
+    notice = next(f for f in job.flags if "not a job" in f)
+    assert "PAYPRC" in notice                             # the notice names the PROC expanded
+
+
+def test_both_views_carry_isproc_for_a_bare_proc_member():
+    """An empty `job` cannot carry this: an INCLUDE member and a JCL fragment have one too."""
+    job = _job("edvalid.prc")
+    assert build_jcl_lineage(job)["isProc"] is True
+    assert build_jcl_artifacts(job)["isProc"] is True
+
+
+def test_a_job_that_invokes_a_proc_is_not_flagged_as_a_proc():
+    """The defaults-only notice belongs to the standalone member expansion only. A real job
+    EXECs the PROC with its own overrides, so neither the flag nor isProc may fire there."""
+    lib = {"MYPROC": "//MYPROC PROC ENV=TEST\n//RUN EXEC PGM=EDIT\n"
+                     "//IN DD DSN=&ENV..IN,DISP=SHR\n//   PEND\n"}
+    job = parse_jcl("//J JOB\n//S1 EXEC MYPROC,ENV=PROD\n",
+                    resolver=lambda n: lib.get(n.upper()))
+    assert job.is_proc is False
+    assert not any("not a job" in f for f in job.flags)   # the PROC path must not inherit it
+    assert build_jcl_artifacts(job)["isProc"] is False
+
+
+def test_an_include_style_fragment_is_not_a_proc():
+    """A fragment with DD statements and no PROC card has an empty job name just like a bare
+    PROC member does - isProc is what tells the two apart."""
+    job = parse_jcl("//STDLIB DD DSN=PROD.FIN.STDCTL,DISP=SHR\n"
+                    "//SYSOUT DD SYSOUT=*\n")
+    assert job.name == "" and job.is_proc is False
+    assert build_jcl_lineage(job)["isProc"] is False
 
 
 # --------------------------------------------------------------------------- #
