@@ -3,7 +3,7 @@
 import json
 from pathlib import Path
 
-from jcl_dependencies.parser import parse_jcl
+from jcl_dependencies.parser import parse_jcl, _dd_direction
 from jcl_dependencies.views import build_jcl_artifacts, build_jcl_lineage
 
 EXAMPLES = Path(__file__).resolve().parents[1] / "examples"
@@ -45,6 +45,123 @@ def test_unresolved_symbolic_is_flagged_not_guessed():
     seg = job.steps[0].dds[0].segments[0]
     assert "&NOPE" in seg.dsn                   # left visible, not blanked
     assert any("NOPE" in f for f in job.flags)
+
+
+# --------------------------------------------------------------------------- #
+# the operand field ends at the first unquoted blank: the card identification field
+# (columns 73-80) and inline comments are never operands
+# --------------------------------------------------------------------------- #
+
+def _card(stmt: str, ident: str) -> str:
+    """A real 80-column card image: the statement, blanks to column 72, then the
+    free-form identification field in columns 73-80."""
+    card = stmt.ljust(71) + " " + ident
+    assert len(card) == 80
+    return card
+
+
+def test_an_identification_field_is_not_part_of_the_program_name():
+    job = parse_jcl("//J JOB\n" + _card("//S1 EXEC PGM=WRKUTIL", "00012260") + "\n")
+    assert job.steps[0].pgm == "WRKUTIL"
+
+
+def test_a_statement_without_an_identification_field_is_unchanged():
+    """Regression guard: the normal path must be untouched. The same card punched short
+    and punched to 80 columns has to name the same program - it did not before."""
+    short = parse_jcl("//J JOB\n//S1 EXEC PGM=WRKUTIL\n")
+    padded = parse_jcl("//J JOB\n" + _card("//S1 EXEC PGM=WRKUTIL", "00012260") + "\n")
+    assert short.steps[0].pgm == padded.steps[0].pgm == "WRKUTIL"
+
+
+def test_an_identification_field_is_not_part_of_a_dataset_name():
+    job = parse_jcl("//J JOB\n//S EXEC PGM=P\n"
+                    + _card("//D1 DD DSN=A.B.C", "00001000") + "\n")
+    assert job.steps[0].dds[0].segments[0].dsn == "A.B.C"
+
+
+def test_an_identification_field_does_not_swallow_the_last_keyword():
+    """DSN= is only corrupted when it is last on the card; whichever keyword IS last takes
+    the absorption. Here that is DISP, and a corrupted DISP loses the direction."""
+    job = parse_jcl("//J JOB\n//S EXEC PGM=P\n"
+                    + _card("//D1 DD DSN=A.B.C,DISP=SHR", "00001000") + "\n")
+    seg = job.steps[0].dds[0].segments[0]
+    assert seg.dsn == "A.B.C" and seg.disp == ["SHR"]
+
+
+def test_a_continuation_is_followed_when_the_card_carries_an_identification_field():
+    """The one that fails loudest: the continuation test used to see the identification
+    field rather than the operand field, so the comma was invisible and every operand on
+    the following cards was lost."""
+    job = parse_jcl(
+        "//J JOB\n//S EXEC PGM=P\n"
+        + _card("//D1 DD DSN=A.B.C,", "00002200") + "\n"
+        "//             DISP=(NEW,CATLG,DELETE),\n"
+        "//             UNIT=SYSDA\n")
+    seg = job.steps[0].dds[0].segments[0]
+    assert seg.disp == ["NEW", "CATLG", "DELETE"]
+    assert _dd_direction(seg) == "output"
+
+
+def test_an_inline_comment_does_not_become_an_operand():
+    job = parse_jcl("//J JOB\n//S1 EXEC PGM=IEFBR14  RUN THE NULL PROGRAM\n")
+    assert job.steps[0].pgm == "IEFBR14"
+
+
+def test_a_quoted_operand_containing_a_blank_survives():
+    """The case a naive split() breaks, and the reason the scan tracks quotes."""
+    job = parse_jcl("//J JOB\n//S1 EXEC PGM=X,PARM='A B'\n")
+    assert job.steps[0].parm == "'A B'"
+
+
+def test_a_quoted_literal_split_across_cards_survives():
+    """The quote state carries along the continuation chain. A card that resumes a literal
+    is operand text throughout, blanks included; scanning it as if it began outside a
+    quote would cut 'ALPHA,BETA GAMMA' down to 'ALPHA,BETA."""
+    job = parse_jcl("//J JOB\n"
+                    "//S1 EXEC PGM=Y,PARM='ALPHA,\n"
+                    "//             BETA GAMMA'\n")
+    assert job.steps[0].parm == "'ALPHA,BETA GAMMA'"
+
+
+def test_proc_overrides_on_a_continuation_card_reach_the_expansion():
+    """Both cards' overrides must arrive, not just the first card's."""
+    job = parse_jcl(
+        "//J JOB\n"
+        "//P PROC DSN=DEFAULT.DATA,JOBNAME=NONE\n"
+        "//RUN EXEC PGM=PAYCALC\n"
+        "//IN DD DSN=&DSN,DISP=SHR\n"
+        "//    PEND\n"
+        + _card("//S1 EXEC P,DSN=X.Y,", "00003000") + "\n"
+        "//             JOBNAME=J\n")
+    seg = next(dd for s in job.steps for dd in s.dds if dd.ddname == "IN").segments[0]
+    assert seg.dsn == "X.Y"                     # the first card's override
+    assert job.steps[0].from_proc == "P"
+
+
+def test_an_if_expression_keeps_its_blanks_and_still_sheds_its_identification_field():
+    """IF is the one statement the first-blank rule does not fit: its operand is a
+    relational expression that legitimately contains blanks, so it ends at THEN instead.
+    Stopping at the first blank would reduce `(PREP.RC = 0)` to `(PREP.RC`."""
+    plain = parse_jcl("//J JOB\n// IF (PREP.RC = 0) THEN\n"
+                      "//S1 EXEC PGM=P\n// ENDIF\n")
+    assert plain.steps[0].conditions == [{"expr": "(PREP.RC = 0)", "negated": False}]
+    # ...and ending at THEN sheds the identification field for free, which the trailing
+    # `THEN\s*$` strip could not do while the sequence number sat behind it.
+    padded = parse_jcl("//J JOB\n" + _card("// IF (PREP.RC = 0) THEN", "00001000") + "\n"
+                       "//S1 EXEC PGM=P\n// ENDIF\n")
+    assert padded.steps[0].conditions == plain.steps[0].conditions
+
+
+def test_a_file_of_short_lines_is_unaffected():
+    """No truncation happens where there is nothing to truncate."""
+    src = ("//J JOB\n//S EXEC PGM=P\n"
+           "//IN DD DSN=PROD.A,DISP=SHR\n"
+           "//   DD DSN=PROD.B,DISP=SHR\n")
+    assert max(len(ln) for ln in src.splitlines()) < 72
+    job = parse_jcl(src)
+    dd = job.steps[0].dds[0]
+    assert [s.dsn for s in dd.segments] == ["PROD.A", "PROD.B"]
+    assert all(s.disp == ["SHR"] for s in dd.segments)
 
 
 def test_concatenated_dd_is_one_dd_many_segments():

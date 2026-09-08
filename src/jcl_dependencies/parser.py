@@ -120,6 +120,49 @@ _CONT = re.compile(r"^//\s+(\S.*)$")           # blank name field -> continuatio
 _COMMENT = re.compile(r"^//\*")
 
 
+# The IF statement is the one exception to the first-blank rule: its operand is a
+# relational expression that legitimately contains blanks (`(PREP.RC = 0) THEN`), so its
+# operand field ends at THEN instead. ELSE and ENDIF carry no operands at all.
+_IF_THEN = re.compile(r"^(.*?\bTHEN)\b", re.I)
+
+
+def _operand_field(text: str, in_quote: bool = False, op: str = "") -> Tuple[str, bool]:
+    """The operand field only - the inline comment and the card identification field
+    removed - and whether it ended inside a quote.
+
+    A JCL statement occupies columns 1-71; column 72 is the continuation indicator and
+    columns 73-80 are a free-form identification field, conventionally a card sequence
+    number, that is never part of the statement. Separately, within the statement, the
+    operand field ends at the first blank that is not inside quotes and everything after
+    that blank is a comment. One rule covers both: stop at that blank.
+
+    Truncating at column 71 instead would not be equivalent - it would leave an inline
+    comment on a short card in place, and it would corrupt a statement in a file whose
+    lines have been reflowed and are no longer card images.
+
+    ``in_quote`` carries the quote state along a continuation chain, because a literal may
+    be split across cards: `PARM='ALPHA,` continued by `BETA GAMMA'` is one value, and a
+    card that resumes a literal is operand text throughout, blanks included. Scanning such
+    a card as if it began outside a quote would cut it at its first space.
+
+    ``op`` selects the rule. Only IF differs, and only when its THEN is on this card: a
+    THEN carried onto a continuation leaves the expression ending in a blank-bearing
+    fragment, which is what today's code already produces."""
+    if op.upper() == "IF":
+        m = _IF_THEN.match(text)
+        return (m.group(1) if m else text), in_quote
+    out = []
+    for ch in text:
+        if ch == "'":
+            in_quote = not in_quote
+            out.append(ch)
+        elif ch == " " and not in_quote:
+            break
+        else:
+            out.append(ch)
+    return "".join(out), in_quote
+
+
 @dataclass
 class _LogLine:
     name: str
@@ -150,10 +193,12 @@ def _gather(physical: List[str]) -> Tuple[List[object], List[str]]:
         if not m:
             i += 1
             continue
-        name, op, operands = m.group(1), m.group(2), (m.group(3) or "")
+        name, op = m.group(1), m.group(2)
+        operands, in_quote = _operand_field(m.group(3) or "", op=op)
         raw_parts = [line]
-        # merge continuations: while operands end with a comma (ignoring trailing
-        # inline comment), the following blank-name // lines continue the operand field.
+        # merge continuations: while the operand field ends with a comma, the following
+        # blank-name // lines continue it. The trailing inline comment and the card
+        # identification field are already gone, so the test sees the operand field itself.
         while operands.rstrip().endswith(","):
             j = i + 1
             while j < n and _COMMENT.match(physical[j].rstrip()):
@@ -163,7 +208,8 @@ def _gather(physical: List[str]) -> Tuple[List[object], List[str]]:
             cont = _CONT.match(physical[j].rstrip("\n").rstrip())
             if not cont:
                 break
-            operands = operands.rstrip() + cont.group(1).strip()
+            part, in_quote = _operand_field(cont.group(1).strip(), in_quote, op)
+            operands = operands.rstrip() + part
             raw_parts.append(physical[j].rstrip())
             i = j
         out.append(_LogLine(name=name.upper(), op=op.upper(), operands=operands,
@@ -916,7 +962,8 @@ class _Parser:
             if not m:
                 i += 1
                 continue
-            name, op, operands = m.group(1).upper(), m.group(2).upper(), (m.group(3) or "")
+            name, op = m.group(1).upper(), m.group(2).upper()
+            operands, in_quote = _operand_field(m.group(3) or "", op=op)
             raw_parts = [line]
             while operands.rstrip().endswith(","):
                 j = i + 1
@@ -927,7 +974,8 @@ class _Parser:
                 cont = _CONT.match(self.physical[j].rstrip("\n").rstrip())
                 if not cont:
                     break
-                operands = operands.rstrip() + cont.group(1).strip()
+                part, in_quote = _operand_field(cont.group(1).strip(), in_quote, op)
+                operands = operands.rstrip() + part
                 raw_parts.append(self.physical[j].rstrip())
                 i = j
             log = _LogLine(name=name, op=op, operands=operands, raw="\n".join(raw_parts))
