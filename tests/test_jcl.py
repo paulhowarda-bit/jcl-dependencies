@@ -805,3 +805,14 @@ def test_a_promised_continuation_followed_by_a_non_continuation_is_flagged():
                     "//D1 DD DSN=A.B.C,\n"
                     "//D2 DD DSN=D.E.F,DISP=SHR\n")
     assert any("is not one" in f for f in job.flags), job.flags
+
+
+def test_the_manifest_conforms_to_the_written_core():
+    """mainframe-artifacts now writes the manifest's shared row vocabulary down (upstream
+    ledger batch 10, item 31), so this package can check itself against the contract
+    rather than against the COBOL package's prose."""
+    from mainframe_artifacts.manifest import validate_manifest
+
+    for path in sorted(EXAMPLES.glob("*")):
+        job = parse_jcl(path.read_text(), source_name=path.name)
+        assert validate_manifest(build_jcl_artifacts(job)) == [], path.name
