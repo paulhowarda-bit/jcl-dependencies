@@ -22,6 +22,7 @@ from typing import Dict, List, Optional, Tuple
 
 from mainframe_artifacts.synonyms import FROM_MAP, SynonymLookup
 
+from . import VIEW_SCHEMA_VERSION
 from .parser import DD, DDSegment, Job, Step, _dd_direction
 
 
@@ -294,6 +295,7 @@ def build_jcl_lineage(job: Job) -> dict:
 
     return {
         "format": "jcl-dependencies-lineage",
+        "formatVersion": VIEW_SCHEMA_VERSION,
         "job": job.name,
         # An empty `job` is not a usable signal on its own: an INCLUDE member and a JCL
         # fragment also have no JOB card. State it.
@@ -548,6 +550,7 @@ def build_jcl_artifacts(job: Job, *, synonyms: Optional[SynonymLookup] = None) -
 
     return {
         "format": "jcl-dependencies-artifacts",
+        "formatVersion": VIEW_SCHEMA_VERSION,
         "job": job.name,
         "isProc": job.is_proc,
         "source": job.source_name,
