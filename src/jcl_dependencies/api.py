@@ -17,6 +17,7 @@ from mainframe_artifacts.prefetch import PrefetchResult
 from mainframe_artifacts.profiling import StageTimer
 from mainframe_artifacts.synonyms import SynonymLookup
 
+from . import PRODUCER
 from .parser import Job, parse_jcl
 from .prefetch import prefetch_jcl
 from .views import bind_cobol_artifacts, build_jcl_artifacts, build_jcl_lineage
@@ -102,7 +103,7 @@ def analyze(source: str, *, source_name: str = "<jcl>",
     with timer.stage("prefetch"):
         pre = prefetch_jcl(source, fetcher, paths=list(paths), dest=dest,
                            source_name=source_name, unavailable=unavailable,
-                           max_rounds=max_rounds, jobs=jobs)
+                           max_rounds=max_rounds, jobs=jobs, producer=PRODUCER)
     with timer.stage("parse"):
         job = parse_jcl(source, resolver=pre.resolver(), source_name=source_name)
 
@@ -117,7 +118,8 @@ def analyze(source: str, *, source_name: str = "<jcl>",
     with timer.stage("fetch"):
         analysis.fetch = fetch_dependencies(art, fetcher, dest=dest,
                                             prefetched=pre.store,
-                                            unavailable=unavailable, jobs=jobs)
+                                            unavailable=unavailable, jobs=jobs,
+                                            producer=PRODUCER)
     return analysis
 
 

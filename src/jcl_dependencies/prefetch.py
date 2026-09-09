@@ -35,14 +35,16 @@ def prefetch_jcl(source: str, fetcher: Optional[Callable],
                  unavailable: Optional[str] = None,
                  result: Optional[PrefetchResult] = None,
                  jobs: int = 1,
-                 seen: Optional[Iterable[str]] = None) -> PrefetchResult:
+                 seen: Optional[Iterable[str]] = None,
+                 producer: Optional[str] = None) -> PrefetchResult:
     """Close over the cataloged PROCs, ``INCLUDE`` members and control-card datasets a
     job needs, by replaying the parse until it stops asking for members it has not got.
 
     No type hint is passed: the estate service auto-detects, and its ``detected_type`` is
     a better answer than anything we could infer from the DD that referenced the member.
     """
-    pf = Prefetcher(fetcher, paths, dest, unavailable, result, seen=seen)
+    pf = Prefetcher(fetcher, paths, dest, unavailable, result, seen=seen,
+                    producer=producer)
     pf.name_source(source_name)
 
     for _ in range(max_rounds):
