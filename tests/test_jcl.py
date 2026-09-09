@@ -788,3 +788,20 @@ def test_the_instream_data_path_gets_the_same_rule():
                     "/*\n")
     assert job.steps[0].parm == "'ALPHA,BETA GAMMA'"
     assert job.steps[0].dds[0].ddname == "SYSIN"
+
+
+def test_a_continuation_that_never_arrives_is_flagged_not_swallowed():
+    """A promised continuation that runs off the end of the deck. The statement is
+    incomplete and its remaining operands are simply not in the model - silence there
+    reads afterwards as a job that did not name them."""
+    job = parse_jcl("//J JOB\n//S1 EXEC PGM=P\n//D1 DD DSN=A.B.C,\n")
+    assert any("continues past the last card" in f for f in job.flags), job.flags
+
+
+def test_a_promised_continuation_followed_by_a_non_continuation_is_flagged():
+    """The other silent exit: the next card is a statement in its own right, so the
+    operands the first card promised are lost."""
+    job = parse_jcl("//J JOB\n//S1 EXEC PGM=P\n"
+                    "//D1 DD DSN=A.B.C,\n"
+                    "//D2 DD DSN=D.E.F,DISP=SHR\n")
+    assert any("is not one" in f for f in job.flags), job.flags

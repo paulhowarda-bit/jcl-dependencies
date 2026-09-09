@@ -197,7 +197,8 @@ def _operands_of(text: str, line: str, op: str, in_quote: bool = False):
 
 
 def _merge_continuations(physical: List[str], i: int, line: str, text: str,
-                         op: str) -> Tuple[str, List[str], int]:
+                         op: str,
+                         flags: Optional[List[str]] = None) -> Tuple[str, List[str], int]:
     """Stitch a statement's continuation cards onto it. Returns (operands, raw, index).
 
     Shared by `_gather` and `Parser._logical_with_data`, which carried byte-identical
@@ -208,7 +209,12 @@ def _merge_continuations(physical: List[str], i: int, line: str, text: str,
     Both signals are required for the open-literal case. A non-blank column 72 on its own
     is not safe: a member whose identification field is misaligned by one column would
     then swallow the statement after it, and that statement's dataset would vanish. That
-    is a worse failure than the one being fixed."""
+    is a worse failure than the one being fixed.
+
+    ``flags`` is where a promised continuation that never arrives is reported. Both exits
+    below mean the statement is incomplete and its remaining operands - a DSN, a DISP, a
+    PARM - are simply not in the model. Silence there reads afterwards as a job that did
+    not name them, which is the failure this package exists to prevent."""
     n = len(physical)
     indicator = _continuation_indicator(line)
     operands, in_quote = _operands_of(text, line, op)
@@ -218,10 +224,17 @@ def _merge_continuations(physical: List[str], i: int, line: str, text: str,
         while j < n and _COMMENT.match(physical[j].rstrip()):
             j += 1
         if j >= n:
+            if flags is not None:
+                flags.append(f"{op or 'statement'} continues past the last card - its "
+                             f"remaining operands are not in this model")
             break
         cont_line = physical[j].rstrip("\n").rstrip()
         cont = _CONT.match(cont_line)
         if not cont:
+            if flags is not None:
+                flags.append(f"{op or 'statement'} promises a continuation but the next "
+                             f"card is not one - its remaining operands are not in this "
+                             f"model")
             break
         indicator = _continuation_indicator(cont_line)
         part, in_quote = _operands_of(cont.group(1), cont_line, op, in_quote)
@@ -263,7 +276,7 @@ def _gather(physical: List[str]) -> Tuple[List[object], List[str]]:
             continue
         name, op = m.group(1), m.group(2)
         operands, raw_parts, i = _merge_continuations(physical, i, line,
-                                                      m.group(3) or "", op)
+                                                      m.group(3) or "", op, flags)
         out.append(_LogLine(name=name.upper(), op=op.upper(), operands=operands,
                             raw="\n".join(raw_parts)))
         i += 1
@@ -1016,7 +1029,8 @@ class _Parser:
                 continue
             name, op = m.group(1).upper(), m.group(2).upper()
             operands, raw_parts, i = _merge_continuations(self.physical, i, line,
-                                                          m.group(3) or "", op)
+                                                          m.group(3) or "", op,
+                                                          self.job.flags)
             log = _LogLine(name=name, op=op, operands=operands, raw="\n".join(raw_parts))
             items.append({"kind": "stmt", "line": log})
             # DD * / DD DATA: capture the instream block that follows.
@@ -1244,7 +1258,8 @@ class _Parser:
         text = self._resolve(member, "INCLUDE")
         if text is None:
             return
-        merged, _ = _gather(text.splitlines())
+        merged, gathered_flags = _gather(text.splitlines())
+        self.job.flags.extend(f"INCLUDE {member}: {f}" for f in gathered_flags)
         step = cur_step
         for log in merged:
             op = log.op
