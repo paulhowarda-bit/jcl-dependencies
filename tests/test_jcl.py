@@ -770,7 +770,7 @@ def test_a_non_blank_column_72_with_balanced_quotes_does_not_continue():
 def test_an_apostrophe_in_a_comment_is_not_an_open_literal():
     """A quote-parity count over columns 1-71 reports nearly twice as many cards on a
     real corpus as it should; the whole difference is comment apostrophes. The scan ends at
-    first unquoted blank, so the apostrophe is never reached."""
+    the first unquoted blank, so the apostrophe is never reached."""
     job = parse_jcl("//J JOB\n//S1 EXEC PGM=P\n"
                     "//EXCPRPT DD SYSOUT=*  DON'T WRITE TO CLASS 7\n")
     assert job.steps[0].dds[0].segments[0].sysout == "*"
