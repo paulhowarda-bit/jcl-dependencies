@@ -163,6 +163,74 @@ def _operand_field(text: str, in_quote: bool = False, op: str = "") -> Tuple[str
     return "".join(out), in_quote
 
 
+def _continuation_indicator(line: str) -> bool:
+    """Whether column 72 of this card carries a continuation indicator.
+
+    JCL continues a statement by coding through column 71 and putting ANY non-blank
+    character in column 72. That is the only continuation signal when the operand field
+    does not end in a comma - which is exactly the case a quoted value split across cards
+    produces. ``line`` is already right-stripped, so a card with nothing beyond column 71
+    is simply too short and reports False."""
+    return bool(line[71:72].strip())
+
+
+def _statement_columns(text: str, line: str) -> str:
+    """``text`` cut back to the statement columns of the card it came from.
+
+    Columns 1-71 are the statement; 72 is the continuation indicator and 73-80 identify
+    the card. `_operand_field`'s first-blank rule normally removes 73-80 for free, because
+    a blank separates them from the operands - but it cannot when the operand field is
+    still inside a quote at column 71, and then the scan runs to the end of the physical
+    line and absorbs the identification field. Applied only in that case, so a file whose
+    lines have been reflowed and are no longer card images is left alone."""
+    over = len(line) - 71
+    return text[:len(text) - over] if over > 0 else text
+
+
+def _operands_of(text: str, line: str, op: str, in_quote: bool = False):
+    """The operand field of one card, re-scanned within columns 1-71 if it ended open."""
+    operands, ended_in_quote = _operand_field(text.strip(), in_quote, op)
+    if ended_in_quote:
+        operands, ended_in_quote = _operand_field(
+            _statement_columns(text, line).strip(), in_quote, op)
+    return operands, ended_in_quote
+
+
+def _merge_continuations(physical: List[str], i: int, line: str, text: str,
+                         op: str) -> Tuple[str, List[str], int]:
+    """Stitch a statement's continuation cards onto it. Returns (operands, raw, index).
+
+    Shared by `_gather` and `Parser._logical_with_data`, which carried byte-identical
+    copies of this loop. A continuation is signalled two ways and BOTH are honoured: an
+    operand field ending in a comma, or - for a quoted value split mid-literal, where no
+    comma is possible - an open quote together with a non-blank column 72.
+
+    Both signals are required for the open-literal case. A non-blank column 72 on its own
+    is not safe: a member whose identification field is misaligned by one column would
+    then swallow the statement after it, and that statement's dataset would vanish. That
+    is a worse failure than the one being fixed."""
+    n = len(physical)
+    indicator = _continuation_indicator(line)
+    operands, in_quote = _operands_of(text, line, op)
+    raw_parts = [line]
+    while operands.rstrip().endswith(",") or (in_quote and indicator):
+        j = i + 1
+        while j < n and _COMMENT.match(physical[j].rstrip()):
+            j += 1
+        if j >= n:
+            break
+        cont_line = physical[j].rstrip("\n").rstrip()
+        cont = _CONT.match(cont_line)
+        if not cont:
+            break
+        indicator = _continuation_indicator(cont_line)
+        part, in_quote = _operands_of(cont.group(1), cont_line, op, in_quote)
+        operands = operands.rstrip() + part
+        raw_parts.append(physical[j].rstrip())
+        i = j
+    return operands, raw_parts, i
+
+
 @dataclass
 class _LogLine:
     name: str
@@ -194,24 +262,8 @@ def _gather(physical: List[str]) -> Tuple[List[object], List[str]]:
             i += 1
             continue
         name, op = m.group(1), m.group(2)
-        operands, in_quote = _operand_field(m.group(3) or "", op=op)
-        raw_parts = [line]
-        # merge continuations: while the operand field ends with a comma, the following
-        # blank-name // lines continue it. The trailing inline comment and the card
-        # identification field are already gone, so the test sees the operand field itself.
-        while operands.rstrip().endswith(","):
-            j = i + 1
-            while j < n and _COMMENT.match(physical[j].rstrip()):
-                j += 1
-            if j >= n:
-                break
-            cont = _CONT.match(physical[j].rstrip("\n").rstrip())
-            if not cont:
-                break
-            part, in_quote = _operand_field(cont.group(1).strip(), in_quote, op)
-            operands = operands.rstrip() + part
-            raw_parts.append(physical[j].rstrip())
-            i = j
+        operands, raw_parts, i = _merge_continuations(physical, i, line,
+                                                      m.group(3) or "", op)
         out.append(_LogLine(name=name.upper(), op=op.upper(), operands=operands,
                             raw="\n".join(raw_parts)))
         i += 1
@@ -963,21 +1015,8 @@ class _Parser:
                 i += 1
                 continue
             name, op = m.group(1).upper(), m.group(2).upper()
-            operands, in_quote = _operand_field(m.group(3) or "", op=op)
-            raw_parts = [line]
-            while operands.rstrip().endswith(","):
-                j = i + 1
-                while j < n and _COMMENT.match(self.physical[j].rstrip()):
-                    j += 1
-                if j >= n:
-                    break
-                cont = _CONT.match(self.physical[j].rstrip("\n").rstrip())
-                if not cont:
-                    break
-                part, in_quote = _operand_field(cont.group(1).strip(), in_quote, op)
-                operands = operands.rstrip() + part
-                raw_parts.append(self.physical[j].rstrip())
-                i = j
+            operands, raw_parts, i = _merge_continuations(self.physical, i, line,
+                                                          m.group(3) or "", op)
             log = _LogLine(name=name, op=op, operands=operands, raw="\n".join(raw_parts))
             items.append({"kind": "stmt", "line": log})
             # DD * / DD DATA: capture the instream block that follows.

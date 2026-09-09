@@ -696,3 +696,95 @@ def test_instream_data_on_a_non_card_dd_is_never_classified_as_control():
     sysin = next(dd for s in job.steps for dd in s.dds if dd.ddname == "SYSIN")
     assert sysin.control["utility"] == "IDCAMS"
     assert sysin.control["operations"] == [{"op": "DELETE", "target": "PROD.OLD.FILE"}]
+
+
+# --------------------------------------------------------------------------- #
+# Column 72: the continuation signal a trailing-comma test cannot see.
+# Upstream ledger batch 10, item 32. No example in the corpus carries a non-blank
+# column 72 outside a //* comment, so the byte ratchet can see neither the defect nor
+# the fix - these tests are the only coverage. They live here rather than in examples/
+# deliberately: a new example would add four golden lines and destroy the
+# byte-neutrality claim that is this change's acceptance signal.
+# --------------------------------------------------------------------------- #
+
+def _cont_card(stmt: str, indicator: str = "X", ident: str = "") -> str:
+    """An 80-column card continued the other way: coded through column 71, with a
+    non-blank continuation character in column 72."""
+    card = stmt.ljust(71) + indicator + ident.ljust(8)
+    assert len(card) == 80 and card[71] == indicator
+    return card
+
+
+def test_an_open_literal_at_column_71_does_not_absorb_the_identification_field():
+    """The defect. With no blank outside quotes to stop at, the first-blank rule cannot
+    remove columns 73-80, so the scan ran to the end of the physical line and the
+    continuation test saw the sequence number instead of the comma."""
+    job = parse_jcl("//J JOB\n"
+                    + _card("//S1 EXEC PGM=Y,PARM='ALPHA,", "00230000") + "\n"
+                    "//             BETA GAMMA'\n")
+    assert job.steps[0].parm == "'ALPHA,BETA GAMMA'"
+
+
+def test_the_absorbed_card_does_not_become_a_phantom_statement():
+    """The second consequence: the tail of the literal was matched as a statement in its
+    own right, under whatever its first token happened to be."""
+    job = parse_jcl("//J JOB\n"
+                    + _card("//S1 EXEC PGM=IKJEFT01,PARM='ALPHA,", "00230000") + "\n"
+                    + _card("//             BETA GAMMA'", "00240000") + "\n"
+                    + _card("//IN      DD DSN=PROD.INPUT.FILE,DISP=SHR", "00250000") + "\n")
+    assert [s.name for s in job.steps] == ["S1"]
+    assert job.steps[0].pgm == "IKJEFT01"
+    assert job.steps[0].dds[0].ddname == "IN"
+    assert job.steps[0].dds[0].segments[0].dsn == "PROD.INPUT.FILE"
+
+
+def test_column_72_continues_a_literal_with_no_trailing_comma_anywhere():
+    """JCL splits a quoted value by coding through 71 and putting any character in 72.
+    There is no comma for a trailing-comma test to find."""
+    job = parse_jcl("//J JOB\n"
+                    + _cont_card("//S1 EXEC PGM=Y,PARM='ALPHA") + "\n"
+                    "//             BETA'\n")
+    assert job.steps[0].parm == "'ALPHABETA'"
+
+
+def test_a_blank_inside_a_continued_literal_survives():
+    """`NON STD` puts a blank INSIDE the literal, so it exercises the quote threading as
+    well as the column rule."""
+    job = parse_jcl("//J JOB\n"
+                    + _cont_card("//S1 EXEC PGM=Y,PARM='VENDOR,NON STD") + "\n"
+                    "//             ,120'\n")
+    assert job.steps[0].parm == "'VENDOR,NON STD,120'"
+
+
+def test_a_non_blank_column_72_with_balanced_quotes_does_not_continue():
+    """Both signals are required. A misaligned identification field must not swallow the
+    statement after it - that is a worse failure than the one being fixed."""
+    job = parse_jcl("//J JOB\n"
+                    + _cont_card("//S1 EXEC PGM=Y,PARM='ALPHA'") + "\n"
+                    "//IN      DD DSN=PROD.INPUT.FILE,DISP=SHR\n")
+    assert job.steps[0].parm == "'ALPHA'"
+    assert job.steps[0].dds[0].ddname == "IN"
+    assert job.steps[0].dds[0].segments[0].dsn == "PROD.INPUT.FILE"
+
+
+def test_an_apostrophe_in_a_comment_is_not_an_open_literal():
+    """A quote-parity count over columns 1-71 reports nearly twice as many cards on a
+    real corpus as it should; the whole difference is comment apostrophes. The scan ends at
+    first unquoted blank, so the apostrophe is never reached."""
+    job = parse_jcl("//J JOB\n//S1 EXEC PGM=P\n"
+                    "//EXCPRPT DD SYSOUT=*  DON'T WRITE TO CLASS 7\n")
+    assert job.steps[0].dds[0].segments[0].sysout == "*"
+
+
+def test_the_instream_data_path_gets_the_same_rule():
+    """The continuation loop is shared with `Parser._logical_with_data`. Fixing only
+    `_gather` would leave a job carrying instream data parsing differently from one
+    that does not."""
+    job = parse_jcl("//J JOB\n"
+                    + _card("//S1 EXEC PGM=Y,PARM='ALPHA,", "00230000") + "\n"
+                    "//             BETA GAMMA'\n"
+                    "//SYSIN DD *\n"
+                    "  SOME CONTROL CARD\n"
+                    "/*\n")
+    assert job.steps[0].parm == "'ALPHA,BETA GAMMA'"
+    assert job.steps[0].dds[0].ddname == "SYSIN"
