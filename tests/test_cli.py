@@ -72,6 +72,26 @@ def test_gather_then_replay_reproduces_the_views(tmp_path):
         assert (offline / name).read_text() == (live / name).read_text()
 
 
+def test_gather_records_the_reverse_direction_it_was_given(tmp_path):
+    """--gather-only is the run that happens where the INDEX is reachable, so a door the
+    CLI forgets to hand it is a bundle that replays the estate and not the reverse
+    direction - and the modelling box has no way to notice."""
+    from mainframe_artifacts.bundle import open_bundle
+
+    bundle, out = tmp_path / "b", tmp_path / "o"
+    job = str(EXAMPLES / "acctunld.jcl")
+    assert run([job, "--outdir", str(tmp_path / "g"), "--fetcher", FAKE, "--jobs", "1",
+                "--gather-only", str(bundle),
+                "--dependents-resolver", "fakes.index:dependents", "-q"]) == 0
+    assert open_bundle(bundle).has_dependents()
+
+    assert run([job, "--outdir", str(out), "--from-bundle", str(bundle), "--jobs", "1",
+                "-q"]) == 0
+    dep = json.loads(next(out.glob("*.jcl.dependents.json")).read_text())
+    row = next(r for r in dep["provides"] if r["name"] == "PROD.ACCT.UNLOAD")
+    assert [d["name"] for d in row["dependents"]] == ["ACCTLOAD"]
+
+
 def test_python_dash_m_works():
     import os
     import subprocess

@@ -163,19 +163,25 @@ def _run(args, timing_sink=None) -> int:
         return 2
     deps = str(out_dir / "deps")
 
-    if args.gather_only:
-        gathered = gather(source, source_name=source_name, fetcher=fetcher, paths=paths,
-                          dest=args.gather_only, unavailable=why,
-                          max_rounds=args.max_rounds, jobs=_jobs(args))
-        _log.info(f"[{source_name}] wrote estate bundle {gathered}")
-        _log.info(f"[{source_name}] model from it with: --from-bundle {args.gather_only}")
-        timer.report()
-        return 0
-
+    # Before the gather branch, not after: --gather-only is the run that happens where the
+    # INDEX is reachable, so it is the run that has to ask it. Built later, the door was
+    # silently dropped from every bundle - which a modelling box has no way to notice.
     reverse, why_dependents = dependents_lookup(args)
     if why_dependents:
         _log.error("error: {0}".format(why_dependents))
         return 2
+
+    if args.gather_only:
+        gathered = gather(source, source_name=source_name, fetcher=fetcher, paths=paths,
+                          dest=args.gather_only, unavailable=why,
+                          max_rounds=args.max_rounds, jobs=_jobs(args),
+                          dependents=reverse.mapping if reverse is not None else None,
+                          dependents_resolver=(reverse.resolver if reverse is not None
+                                               else None))
+        _log.info(f"[{source_name}] wrote estate bundle {gathered}")
+        _log.info(f"[{source_name}] model from it with: --from-bundle {args.gather_only}")
+        timer.report()
+        return 0
 
     analysis = analyze(source, source_name=source_name, bundle=bundle, fetcher=fetcher,
                        retrieve=not args.no_fetch, paths=paths, dest=deps,
