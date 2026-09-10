@@ -22,6 +22,8 @@ from typing import Dict, List, Optional, Tuple
 
 from mainframe_artifacts.synonyms import FROM_MAP, SynonymLookup
 
+from mainframe_artifacts.dependents import output_rows
+
 from . import VIEW_SCHEMA_VERSION
 from .parser import DD, DDSegment, Job, Step, _dd_direction
 
@@ -645,3 +647,108 @@ def bind_cobol_artifacts(cobol_manifest: dict, jobs) -> dict:
             "the ddname -> DSN binding is closed, and 'boundBy' names the job/step that "
             "closed it (with the step's run conditions where the JCL is conditional).")
     return out
+
+
+# --------------------------------------------------------------------------- #
+# dependents - the reverse direction, which only a host index holds
+# --------------------------------------------------------------------------- #
+
+FORMAT_DEPENDENTS = "jcl-dependencies-dependents"
+
+_DEPENDENTS_NOTE = (
+    "What the ESTATE says depends on what this job PROVIDES - the reverse of every other "
+    "view here. A job provides two things another job can depend on: the datasets it "
+    "WRITES, and - when this source is a PROC - the PROC itself, which other jobs EXEC. "
+    "So those are what is asked about, one ask each, rather than everything the job "
+    "names: which jobs read a dataset this one produces is a scheduling fact held in an "
+    "estate index, and no single job's text can contain it. Supplied by the host through "
+    "--dependents-map or --dependents-resolver and reported as given; 'suppliedBy' says "
+    "which door answered. 'matchStrength' is the host's own field, never folded into "
+    "prose, and a capped answer carries 'truncated' with the true 'total'. 'unanswered' "
+    "is the honest half - absent from these lists means nobody said, never that nothing "
+    "depends on the dataset."
+)
+
+
+def _provides(job: Job) -> List[dict]:
+    """What another job can depend on: the datasets this one writes, and the PROC it is.
+
+    Datasets only, deliberately - not the programs it EXECs or the members it is
+    assembled from. Those are what this job depends ON, and asking the reverse question
+    about them would be asking who else runs PGM=IEFBR14: true, and useless.
+    """
+    rows: List[dict] = []
+    # A PROC member's own name is in `procs`, not in `name` - a member carries no JOB
+    # card, and it may define more than one PROC, each of which is separately EXECable.
+    for proc_name in sorted(job.procs) if job.is_proc else ():
+        rows.append({"name": proc_name, "kind": "proc",
+                     "provides": "the PROC itself, EXECable by name"})
+    seen = set()
+    for step, dd, seg, io in _dd_rows(job):
+        # Written, real, and not job-scoped scratch. A temporary (&&) dataset cannot be
+        # depended on from outside the job, so asking about it would be asking a question
+        # with a known answer.
+        if seg is None or io not in ("output", "inout") or seg.dsn.startswith("&&"):
+            continue
+        if seg.dsn in seen:
+            continue
+        seen.add(seg.dsn)
+        rows.append({"name": seg.dsn, "kind": "dataset",
+                     "provides": "written by step {0}".format(step.name)})
+    rows.sort(key=lambda r: (r["kind"], r["name"]))
+    return rows
+
+
+def build_jcl_dependents(job: Job, lookup) -> Optional[dict]:
+    """What depends on what this job provides, or ``None`` if nobody was asked.
+
+    ``None`` rather than an empty view: an empty answer reads as "nothing in the estate
+    reads what this job writes", which is a strong claim about a scheduling graph that a
+    run nobody told anything cannot make.
+    """
+    if lookup is None or not lookup.supplied:
+        return None
+
+    provided: List[dict] = []
+    unanswered: List[dict] = []
+    for row in _provides(job):
+        answer = lookup(row["name"], row["kind"])
+        if answer is None:
+            unanswered.append({
+                "name": row["name"], "kind": row["kind"],
+                "reason": ("the lookup failed earlier in this run and was not asked again"
+                           if lookup.disabled_reason else
+                           "the lookup does not cover this name"),
+            })
+            continue
+        out = {"name": row["name"], "kind": row["kind"], "provides": row["provides"],
+               "dependents": output_rows(answer.rows), "count": len(answer.rows),
+               "suppliedBy": answer.door}
+        if answer.truncated:
+            out["truncated"] = True
+            if answer.total is not None:
+                out["total"] = answer.total
+        provided.append(out)
+
+    flags = []
+    if lookup.disabled_reason:
+        flags.append(
+            "dependents lookup failed mid-run ({0}); names it did not reach stay "
+            "unanswered - fix the lookup and re-run".format(lookup.disabled_reason))
+    if lookup.map_warning:
+        flags.append(
+            "part of the dependents map could not be read ({0}); the entries it did read "
+            "answered normally".format(lookup.map_warning))
+
+    return {
+        "format": FORMAT_DEPENDENTS,
+        "formatVersion": VIEW_SCHEMA_VERSION,
+        "job": job.name,
+        "isProc": job.is_proc,
+        "source": job.source_name,
+        "note": _DEPENDENTS_NOTE,
+        "suppliedBy": lookup.describe(),
+        "provides": provided,
+        "unanswered": unanswered,
+        "flags": flags,
+    }

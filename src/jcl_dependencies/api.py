@@ -9,9 +9,11 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, Optional, Sequence
+from typing import Any, Callable, Dict, Mapping, Optional, Sequence
 
-from mainframe_artifacts.bundle import EstateBundle, recording_fetcher, write_bundle
+from mainframe_artifacts.bundle import (EstateBundle, recording_dependents_resolver,
+                                        recording_fetcher, write_bundle)
+from mainframe_artifacts.dependents import DependentsLookup
 from mainframe_artifacts.fetch import fetch_dependencies
 from mainframe_artifacts.prefetch import PrefetchResult
 from mainframe_artifacts.profiling import StageTimer
@@ -20,7 +22,8 @@ from mainframe_artifacts.synonyms import SynonymLookup
 from . import PRODUCER
 from .parser import Job, parse_jcl
 from .prefetch import prefetch_jcl
-from .views import bind_cobol_artifacts, build_jcl_artifacts, build_jcl_lineage
+from .views import (bind_cobol_artifacts, build_jcl_artifacts,
+                    build_jcl_dependents, build_jcl_lineage)
 
 _log = logging.getLogger(__name__)
 
@@ -37,8 +40,14 @@ class JobAnalysis:
     #: run opened neither door, and then every table is reported as written.
     synonyms: Optional[SynonymLookup] = None
 
+    #: What the estate says depends on what this job provides - None when the run opened
+    #: neither door, and then :meth:`dependents` is None too, because "nobody told us" is
+    #: not "nothing reads what this job writes".
+    dependents_lookup: Optional[DependentsLookup] = None
+
     _lineage: Optional[dict] = field(default=None, repr=False)
     _artifacts: Optional[dict] = field(default=None, repr=False)
+    _dependents: Optional[dict] = field(default=None, repr=False)
 
     def lineage(self) -> dict:
         """Step-to-step dataset dataflow, plus control-card byte-field lineage."""
@@ -52,6 +61,20 @@ class JobAnalysis:
         if self._artifacts is None:
             self._artifacts = build_jcl_artifacts(self.job, synonyms=self.synonyms)
         return self._artifacts
+
+    def dependents(self) -> Optional[dict]:
+        """What depends on the datasets this job writes (and on the PROC it is), or
+        ``None`` if nobody was asked.
+
+        ``None`` rather than an empty view: "no lookup was given" and "nothing in the
+        estate reads what this job writes" are different statements about a scheduling
+        graph, and only the first is usually true.
+        """
+        if self.dependents_lookup is None or not self.dependents_lookup.supplied:
+            return None
+        if self._dependents is None:
+            self._dependents = build_jcl_dependents(self.job, self.dependents_lookup)
+        return self._dependents
 
     def bind(self, cobol_manifest: dict) -> dict:
         """Close the ddname->dataset join on a COBOL program's artifact manifest.
@@ -71,6 +94,8 @@ def analyze(source: str, *, source_name: str = "<jcl>",
             timer: Optional[StageTimer] = None,
             synonyms: Optional[Dict[str, str]] = None,
             synonym_resolver: Optional[Callable[[str], Optional[str]]] = None,
+            dependents: Optional[Mapping[str, Sequence[dict]]] = None,
+            dependents_resolver: Optional[Callable[..., Any]] = None,
             ) -> JobAnalysis:
     """Retrieve, parse and model one JCL job or PROC.
 
@@ -94,6 +119,8 @@ def analyze(source: str, *, source_name: str = "<jcl>",
 
     if bundle is not None:
         fetcher = bundle.fetcher()
+        if dependents_resolver is None and bundle.has_dependents():
+            dependents_resolver = bundle.dependents()
         unavailable = unavailable or bundle.unavailable
     elif not retrieve:
         fetcher = None
@@ -109,10 +136,17 @@ def analyze(source: str, *, source_name: str = "<jcl>",
 
     lookup = (SynonymLookup(synonyms, synonym_resolver)
               if (synonyms or synonym_resolver is not None) else None)
+    reverse = (DependentsLookup(dependents, dependents_resolver)
+               if (dependents or dependents_resolver is not None) else None)
     analysis = JobAnalysis(job=job, prefetch=pre, source_name=source_name,
-                           synonyms=lookup)
+                           synonyms=lookup, dependents_lookup=reverse)
     with timer.stage("jcl-lineage"):
         analysis.lineage()
+    if reverse is not None:
+        # Built here rather than on demand: building it is what ASKS the host, and a
+        # gather run has to make the asks in order to record them.
+        with timer.stage("jcl-dependents"):
+            analysis.dependents()
     with timer.stage("jcl-artifacts"):
         art = analysis.artifacts()
     with timer.stage("fetch"):
@@ -127,12 +161,20 @@ def gather(source: str, *, source_name: str = "<jcl>",
            fetcher: Optional[Any] = None,
            paths: Sequence[str] = (), dest: str,
            unavailable: Optional[str] = None,
-           max_rounds: int = 12, jobs: int = 1) -> str:
-    """Run the retrieval half where the estate is reachable; return the bundle manifest."""
+           max_rounds: int = 12, jobs: int = 1,
+           dependents: Optional[Mapping[str, Sequence[dict]]] = None,
+           dependents_resolver: Optional[Callable[..., Any]] = None) -> str:
+    """Run the retrieval half where the estate is reachable; return the bundle manifest.
+
+    A dependents lookup is gathered like the artifact service: wrapped in a recorder,
+    asked exactly as a live run asks it, and its answers written into the bundle. The
+    index is as unreachable from the modelling box as the estate is."""
     recorder, answers = recording_fetcher(fetcher) if fetcher is not None else (None, [])
+    reverse, reverse_answers = (recording_dependents_resolver(dependents_resolver)
+                                if dependents_resolver is not None else (None, []))
     analysis = analyze(source, source_name=source_name, fetcher=recorder, paths=paths,
                        dest=dest, unavailable=unavailable, max_rounds=max_rounds,
-                       jobs=jobs)
+                       jobs=jobs, dependents=dependents, dependents_resolver=reverse)
     return write_bundle(dest, subject_name=source_name, subject_text=source,
                         kind="jcl", prefetch=analysis.prefetch, answers=answers,
-                        fetch=analysis.fetch)
+                        fetch=analysis.fetch, dependents=reverse_answers)

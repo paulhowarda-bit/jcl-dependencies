@@ -11,7 +11,8 @@ from typing import List, Optional
 from mainframe_artifacts.artifact_service import decode_member, load_fetcher
 from mainframe_artifacts.bundle import open_bundle
 from mainframe_artifacts.cliargs import (add_logging_args, add_output_args,
-                                       add_retrieval_args, add_synonym_args,
+                                       add_dependents_args, add_retrieval_args,
+                                       add_synonym_args, dependents_lookup,
                                        jobs as _jobs, synonym_lookup)
 from mainframe_artifacts.detect import looks_like_jcl
 from mainframe_artifacts.errors import CobolXstateError
@@ -29,7 +30,9 @@ from .api import analyze, gather
 # of configure_logging's reach (so INFO/progress would be silently dropped).
 _log = logging.getLogger("jcl_dependencies.cli")
 
-_SUFFIXES = (".jcl.artifacts.json", ".jcl.lineage.json",
+# The dependents view is not a --target choice: it is not a view you ask for, it is an
+# answer you were given, so it is written exactly when a lookup supplied one.
+_SUFFIXES = (".jcl.artifacts.json", ".jcl.lineage.json", ".jcl.dependents.json",
              ".jcl.prefetch.json", ".jcl.fetch.json")
 
 
@@ -61,6 +64,7 @@ def build_parser() -> argparse.ArgumentParser:
     # Db2 catalog knowledge: a LOAD / UNLOAD / SQL control card written under a
     # SYNONYM/ALIAS names the alias; the base table it stands for lives in the catalog.
     add_synonym_args(p)
+    add_dependents_args(p)
     add_output_args(p, outdir_help=(
         "directory for output (default: ./out). EVERY file this run produces goes here, "
         "exactly as given with nothing appended - both views, both retrieval reports, and "
@@ -168,12 +172,20 @@ def _run(args, timing_sink=None) -> int:
         timer.report()
         return 0
 
+    reverse, why_dependents = dependents_lookup(args)
+    if why_dependents:
+        _log.error("error: {0}".format(why_dependents))
+        return 2
+
     analysis = analyze(source, source_name=source_name, bundle=bundle, fetcher=fetcher,
                        retrieve=not args.no_fetch, paths=paths, dest=deps,
                        unavailable=why, max_rounds=args.max_rounds, jobs=_jobs(args),
                        timer=timer,
                        synonyms=lookup.mapping if lookup is not None else None,
-                       synonym_resolver=lookup.resolver if lookup is not None else None)
+                       synonym_resolver=lookup.resolver if lookup is not None else None,
+                       dependents=reverse.mapping if reverse is not None else None,
+                       dependents_resolver=(reverse.resolver if reverse is not None
+                                            else None))
     job = analysis.job
     base = default_stem or job.name or "job"
 
@@ -181,6 +193,8 @@ def _run(args, timing_sink=None) -> int:
     written = {
         ".jcl.artifacts.json": analysis.artifacts() if "artifacts" in wanted else None,
         ".jcl.lineage.json": analysis.lineage() if "lineage" in wanted else None,
+        # None when no door was opened, and the loop below writes nothing for a None.
+        ".jcl.dependents.json": analysis.dependents(),
         ".jcl.prefetch.json": analysis.prefetch.report(),
         ".jcl.fetch.json": analysis.fetch,
     }
