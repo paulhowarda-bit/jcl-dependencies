@@ -78,6 +78,11 @@ class Step:
     proc_step: Optional[str] = None      # the PROC's own step name
     cond: Optional[str] = None           # COND= text (verbatim; notoriously back-to-front)
     cond_parsed: Optional[dict] = None   # structured COND= with its run-sense spelt out
+    # A PROC step only: the COND= the EXEC that called the PROC applied to it (COND= for
+    # every step, COND.procstep= for one). Kept apart from `cond`, the PROC's own, and it
+    # is the one that holds - the calling EXEC's COND overrides the called EXEC's.
+    invoked_cond: Optional[str] = None
+    invoked_cond_parsed: Optional[dict] = None
     # IF/THEN/ELSE conditions governing this step, outermost first. Each is
     # {expr, negated}: the step runs when every expr holds in its stated polarity
     # (a step in an ELSE branch carries the IF's expr with negated=True).
@@ -1195,12 +1200,16 @@ class _Parser:
             step.flags.append("EXEC with neither PGM= nor a PROC name")
             return [step]
         procname = procname.upper()
+        # COND.procstep= is the invocation's condition for one PROC step, not a symbolic
+        # parameter - read as one it was silently dropped.
+        step_conds = {k.split(".", 1)[1]: v for k, v in kw.items() if k.startswith("COND.")}
         overrides = {k: v for k, v in kw.items()
-                     if k not in ("PROC", "COND", "PARM", "PGM")}
-        return self._expand_proc(log.name, procname, overrides, kw.get("COND"))
+                     if k not in ("PROC", "COND", "PARM", "PGM") and not k.startswith("COND.")}
+        return self._expand_proc(log.name, procname, overrides, kw.get("COND"), step_conds)
 
     def _expand_proc(self, invoke_name: str, procname: str, overrides: Dict[str, str],
-                     cond: Optional[str]) -> List[Step]:
+                     cond: Optional[str],
+                     step_conds: Optional[Dict[str, str]] = None) -> List[Step]:
         if procname in self._expanding:
             s = Step(name=invoke_name, proc=procname, proc_resolved=False, cond=cond)
             s.flags.append(f"PROC {procname}: recursive invocation - not expanded")
@@ -1231,15 +1240,31 @@ class _Parser:
         sub_job = sub.parse_body(symbols)
         self._expanding.discard(procname)
 
+        step_conds = step_conds or {}
         steps: List[Step] = []
         for st in sub_job.steps:
             st.from_proc = procname
             st.proc_step = st.name
             st.proc_resolved = True
             st.name = f"{invoke_name}.{st.name}"
-            if cond and not st.cond:
-                st.cond = cond
+            # The PROC's own COND= stays in `cond`; what this invocation applied is a
+            # separate fact. A nested step (`S1.RUN`) takes the condition aimed at the
+            # step that called its PROC (`S1`), which overrides everything under it.
+            invoked = step_conds.get(st.proc_step.split(".")[0], cond)
+            if invoked:
+                st.invoked_cond = invoked
+                st.invoked_cond_parsed = _parse_cond(invoked)
             steps.append(st)
+        named = {st.proc_step.split(".")[0] for st in steps}
+        for pstep in sorted(set(step_conds) - named):
+            self.job.flags.append(
+                f"EXEC {invoke_name}: COND.{pstep}= names no step of PROC {procname} - "
+                f"that condition is not applied to any step")
+        if cond and set(step_conds) & named:
+            self.job.flags.append(
+                f"EXEC {invoke_name}: both COND= and COND.procstep= are coded; each named "
+                f"step's invokedCond is its COND.procstep= and every other step's is COND= "
+                f"- verify, because how the two combine is not modelled from the reference")
         self.job.flags.extend(f for f in sub_job.flags if f not in self.job.flags)
         return steps
 

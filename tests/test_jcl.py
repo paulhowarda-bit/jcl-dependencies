@@ -816,3 +816,105 @@ def test_the_manifest_conforms_to_the_written_core():
     for path in sorted(EXAMPLES.glob("*")):
         job = parse_jcl(path.read_text(), source_name=path.name)
         assert validate_manifest(build_jcl_artifacts(job)) == [], path.name
+
+
+# --------------------------------------------------------------------------- #
+# a PROC step's own COND and the one its invocation applied, kept apart
+# --------------------------------------------------------------------------- #
+
+_POSTPROC = {"POSTPROC": "//POSTPROC PROC\n//RUN EXEC PGM=EDIT,COND=(8,LT)\n"
+                         "//POST EXEC PGM=POSTX\n"}
+
+
+def _proc_steps(card: str, lib=None):
+    lib = _POSTPROC if lib is None else lib
+    job = parse_jcl("//J JOB\n" + card, resolver=lambda n: lib.get(n.upper()))
+    return job, {s["step"]: s.get("conditions") or {} for s in build_jcl_lineage(job)["steps"]}
+
+
+def _raw(conditions: dict, key: str):
+    return (conditions.get(key) or {}).get("raw")
+
+
+def test_a_proc_step_with_its_own_cond_keeps_it_beside_the_invocations():
+    _, steps = _proc_steps("//S1 EXEC POSTPROC,COND=(4,LT)\n")
+    assert _raw(steps["S1.RUN"], "cond") == "(8,LT)"
+    assert _raw(steps["S1.RUN"], "invokedCond") == "(4,LT)"
+
+
+def test_a_proc_step_with_no_cond_publishes_only_the_invocations():
+    """Absent rather than null, so "not coded in the PROC" stays distinguishable."""
+    _, steps = _proc_steps("//S1 EXEC POSTPROC,COND=(4,LT)\n")
+    assert "cond" not in steps["S1.POST"]
+    assert _raw(steps["S1.POST"], "invokedCond") == "(4,LT)"
+
+
+def test_an_invocation_with_no_cond_leaves_only_the_procs_own():
+    _, steps = _proc_steps("//S1 EXEC POSTPROC\n")
+    assert _raw(steps["S1.RUN"], "cond") == "(8,LT)"
+    assert "invokedCond" not in steps["S1.RUN"]
+    assert steps["S1.POST"] == {}
+
+
+def test_the_invoked_cond_is_parsed_like_any_cond():
+    job, _ = _proc_steps("//S1 EXEC POSTPROC,COND=((4,LT),EVEN)\n")
+    post = next(s for s in job.steps if s.name == "S1.POST")
+    assert post.cond is None
+    assert post.invoked_cond_parsed["tests"] == [{"code": 4, "op": "LT"}]
+    assert post.invoked_cond_parsed["even"] is True
+
+
+def test_cond_procstep_applies_to_the_named_step_alone():
+    """Read as a symbolic override, `COND.POST=` used to vanish and POST looked
+    unconditional."""
+    job, steps = _proc_steps("//S1 EXEC POSTPROC,COND.POST=(0,NE)\n")
+    assert _raw(steps["S1.POST"], "invokedCond") == "(0,NE)"
+    assert "invokedCond" not in steps["S1.RUN"]
+    assert job.flags == []
+
+
+def test_a_step_that_only_its_invocation_conditions_still_counts_as_conditional():
+    lib = {"COPYPROC": "//COPYPROC PROC\n//COPY EXEC PGM=IEBGENER\n"
+                       "//SYSUT2 DD DSN=PROD.COPY.OUT,DISP=(NEW,CATLG,DELETE)\n"}
+    job = parse_jcl("//J JOB\n//S1 EXEC COPYPROC,COND=(4,LT)\n",
+                    resolver=lambda n: lib.get(n.upper()))
+    art = _art_by_name(job)["PROD.COPY.OUT"]
+    assert all(t.get("conditional") for t in art["touchedBy"])
+
+
+def test_cond_procstep_naming_no_step_of_the_proc_is_flagged_not_dropped():
+    job, steps = _proc_steps("//S1 EXEC POSTPROC,COND.NOPE=(0,NE)\n")
+    assert all("invokedCond" not in c for c in steps.values())
+    assert any("COND.NOPE= names no step of PROC POSTPROC" in f for f in job.flags)
+
+
+def test_both_forms_coded_together_are_applied_per_step_and_flagged():
+    job, steps = _proc_steps("//S1 EXEC POSTPROC,COND=(4,LT),COND.RUN=(2,LT)\n")
+    assert _raw(steps["S1.RUN"], "invokedCond") == "(2,LT)"
+    assert _raw(steps["S1.POST"], "invokedCond") == "(4,LT)"
+    assert any("both COND= and COND.procstep= are coded" in f for f in job.flags)
+
+
+def test_a_nested_proc_step_takes_the_cond_aimed_at_the_step_that_called_its_proc():
+    lib = dict(_POSTPROC, OUTER="//OUTER PROC\n//S1 EXEC POSTPROC\n//S2 EXEC PGM=TAIL\n")
+    _, steps = _proc_steps("//J1 EXEC OUTER,COND.S1=(12,LT)\n", lib)
+    assert _raw(steps["J1.S1.RUN"], "invokedCond") == "(12,LT)"
+    assert _raw(steps["J1.S1.POST"], "invokedCond") == "(12,LT)"
+    assert "invokedCond" not in steps["J1.S2"]
+
+
+def test_the_outer_invocation_overrides_an_inner_one():
+    lib = dict(_POSTPROC, OUTER="//OUTER PROC\n//S1 EXEC POSTPROC,COND=(4,LT)\n")
+    _, steps = _proc_steps("//J1 EXEC OUTER,COND=(9,LT)\n", lib)
+    assert _raw(steps["J1.S1.POST"], "invokedCond") == "(9,LT)"
+    _, steps = _proc_steps("//J1 EXEC OUTER\n", lib)
+    assert _raw(steps["J1.S1.POST"], "invokedCond") == "(4,LT)"
+
+
+def test_the_example_keeps_both_conditions_apart():
+    steps = _steps_by_name(build_jcl_lineage(_job("proccond.jcl")))
+    assert _raw(steps["NIGHTLY.POSTRUN"]["conditions"], "cond") == "(8,LT)"
+    assert _raw(steps["NIGHTLY.POSTRUN"]["conditions"], "invokedCond") == "(4,LT)"
+    assert _raw(steps["NIGHTLY.AUDIT"]["conditions"], "invokedCond") == "(4,LT)"
+    assert "invokedCond" not in steps["WEEKLY.POSTRUN"]["conditions"]
+    assert _raw(steps["WEEKLY.AUDIT"]["conditions"], "invokedCond") == "(0,NE)"

@@ -94,6 +94,16 @@ until it stops asking for members it has not got.
 Nothing here follows job-to-job scheduling references (INTRDR, TWS, CA-7). That is a
 different graph, and this package does not pretend to model it.
 
+**A PROC step's condition comes from two artifacts, and both are kept.** A step's
+`conditions.cond` is the `COND=` coded on its own `EXEC` — for a PROC step, the one in the
+PROC member, the same in every job that runs it. `conditions.invokedCond` is the one the
+calling `EXEC` applied to it: `COND=` for every step of the PROC, `COND.procstep=` for one
+step (and, for a nested PROC, the condition aimed at the step that called it). Where both
+exist **`invokedCond` is the one that holds** — the calling EXEC's COND overrides the
+called EXEC's — so the condition a step actually runs under is `invokedCond` if present,
+else `cond`. A `COND.procstep=` naming no step of the PROC, or `COND=` and
+`COND.procstep=` coded together, is flagged. See `examples/proccond.jcl`.
+
 ## The one place it meets the COBOL tool
 
 `bind_cobol_artifacts(manifest, jobs)` joins a COBOL program's file ddnames to the

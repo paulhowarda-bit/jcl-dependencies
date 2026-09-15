@@ -74,12 +74,15 @@ def _dd_rows(job: Job):
 def _step_conditions(step: Step) -> Optional[dict]:
     """The conditions under which this step runs, or None for an unconditional step.
     ``if`` is the IF/THEN/ELSE nesting (every test must hold, in its stated polarity);
-    ``cond`` is the parsed COND= with its bypass sense spelt out."""
+    ``cond`` is the parsed COND= with its bypass sense spelt out; ``invokedCond`` is the
+    COND= a PROC step was called with, which overrides its own ``cond``."""
     c: dict = {}
     if step.conditions:
         c["if"] = [{"test": x["expr"], "negated": x["negated"]} for x in step.conditions]
     if step.cond:
         c["cond"] = step.cond_parsed or {"raw": step.cond}
+    if step.invoked_cond:
+        c["invokedCond"] = step.invoked_cond_parsed
     return c or None
 
 
@@ -315,7 +318,10 @@ def build_jcl_lineage(job: Job) -> dict:
             "ddBindings it contributes) say when it actually runs: 'if' is the IF/THEN/"
             "ELSE nesting (every test must hold, negated=true for an ELSE branch), 'cond' "
             "is the parsed COND= with its BYPASS sense spelt out ('runsWhen' is the "
-            "negation a reader wants - COND is the back-to-front one). Nothing is invented "
+            "negation a reader wants - COND is the back-to-front one). On a PROC step, "
+            "'cond' is the COND= coded in the PROC and 'invokedCond' the one the calling "
+            "EXEC applied (COND= or COND.procstep=); where both exist 'invokedCond' is the "
+            "one that holds, because the calling EXEC's COND overrides. Nothing is invented "
             "- unresolved symbolics/PROCs and ambiguous OLD/I-O directions are in 'flags'. "
             "Where a step runs a COBOL program this tool analyses, the DD ddname is the "
             "join to that program's own interface/lineage: this view supplies the dataset "
