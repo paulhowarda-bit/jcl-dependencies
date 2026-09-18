@@ -20,7 +20,7 @@ library, Python ≥ 3.9.
 
 `mainframe-artifacts` ships from the
 [mainframe-common](https://github.com/paulhowarda-bit/mainframe-common) repository (one
-repo, two distributions; its `mainframe-artifacts/` subdirectory). Until it is on an index,
+repo, several distributions; its `mainframe-artifacts/` subdirectory). Until it is on an index,
 install it straight from that repo:
 
 ```bash
