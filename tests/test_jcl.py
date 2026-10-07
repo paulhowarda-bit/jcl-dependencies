@@ -918,3 +918,222 @@ def test_the_example_keeps_both_conditions_apart():
     assert _raw(steps["NIGHTLY.AUDIT"]["conditions"], "invokedCond") == "(4,LT)"
     assert "invokedCond" not in steps["WEEKLY.POSTRUN"]["conditions"]
     assert _raw(steps["WEEKLY.AUDIT"]["conditions"], "invokedCond") == "(0,NE)"
+
+
+# --------------------------------------------------------------------------- #
+# a symbol's value coded in apostrophes: they delimit the value, they are not in it
+# --------------------------------------------------------------------------- #
+
+def _bindings(text: str, resolver=None):
+    job = parse_jcl(text, resolver=resolver)
+    return job, {(b["step"], b["ddname"]): b for b in build_jcl_lineage(job)["ddBindings"]}
+
+
+_QPROC = ("//P PROC HLQ='PROD'\n"
+          "//S EXEC PGM=X\n"
+          "//DD1 DD DSN=&HLQ..A.B,DISP=SHR\n")
+
+
+def test_a_quoted_proc_default_is_substituted_without_its_apostrophes():
+    """`'PROD'.A.B` is a name no catalog holds."""
+    _, b = _bindings("//J JOB\n" + _QPROC + "// PEND\n//R EXEC P\n")
+    assert b[("R.S", "DD1")]["dataset"] == "PROD.A.B"
+
+
+def test_a_cataloged_procs_quoted_default_is_unquoted_too():
+    _, b = _bindings("//J JOB\n//R EXEC P\n", resolver={"P": _QPROC}.get)
+    assert b[("R.S", "DD1")]["dataset"] == "PROD.A.B"
+
+
+def test_a_bare_proc_members_quoted_default_is_unquoted_too():
+    _, b = _bindings(_QPROC)
+    assert b[("P.S", "DD1")]["dataset"] == "PROD.A.B"
+
+
+def test_a_quoted_exec_override_beats_the_proc_default_and_is_unquoted():
+    _, b = _bindings("//J JOB\n" + _QPROC + "// PEND\n//R EXEC P,HLQ='TEST'\n")
+    assert b[("R.S", "DD1")]["dataset"] == "TEST.A.B"
+
+
+def test_a_quoted_generation_is_still_split_from_the_dataset():
+    """The apostrophes hid `(+1)` from the pattern that splits it off, so the generation
+    stayed in the name."""
+    _, b = _bindings("//J JOB\n// SET GEN='+1'\n//S EXEC PGM=X\n"
+                     "//DD1 DD DSN=PROD.A.GDG(&GEN),DISP=SHR\n")
+    assert b[("S", "DD1")]["dataset"] == "PROD.A.GDG"
+    assert b[("S", "DD1")]["generation"] == "+1"
+
+
+def test_a_quoted_member_is_still_split_from_the_dataset():
+    _, b = _bindings("//J JOB\n// SET MEM='CARD1'\n//S EXEC PGM=X\n"
+                     "//DD1 DD DSN=PROD.CNTL(&MEM),DISP=SHR\n")
+    assert b[("S", "DD1")]["dataset"] == "PROD.CNTL"
+    assert b[("S", "DD1")]["member"] == "CARD1"
+
+
+def test_a_quoted_set_in_an_include_member_is_unquoted_too():
+    _, b = _bindings("//J JOB\n// INCLUDE MEMBER=SETS\n//S EXEC PGM=X\n"
+                     "//DD1 DD DSN=&HLQ..A.B,DISP=SHR\n",
+                     resolver={"SETS": "// SET HLQ='PROD'\n"}.get)
+    assert b[("S", "DD1")]["dataset"] == "PROD.A.B"
+
+
+def test_a_quoted_temporary_name_is_still_a_temporary_dataset():
+    job, b = _bindings("//J JOB\n// SET WORK='&&SCRATCH'\n//S EXEC PGM=X\n"
+                       "//DD1 DD DSN=&WORK,DISP=(NEW,PASS)\n")
+    assert b[("S", "DD1")]["dataset"] == "&&SCRATCH"
+    assert _art_by_name(job)["&&SCRATCH"]["temporary"] is True
+
+
+def test_a_quoted_parm_still_reaches_the_step_as_coded():
+    """The negative: PARM is read from the same operand map and is not a symbol."""
+    job = parse_jcl("//J JOB\n" + _QPROC + "// PEND\n//S1 EXEC PGM=X,PARM='A,B'\n")
+    assert job.steps[0].parm == "'A,B'"
+
+
+def test_symbol_value_strips_one_enclosing_pair_and_collapses_a_doubled_apostrophe():
+    from jcl_dependencies.parser import _symbol_value
+    assert _symbol_value("'PROD'") == "PROD"
+    assert _symbol_value("'O''NEIL'") == "O'NEIL"
+    assert _symbol_value("''") == ""                 # a nullified symbol
+    assert _symbol_value("PROD") == "PROD"           # unquoted: untouched
+    assert _symbol_value("(A,'B')") == "(A,'B')"     # not ENCLOSED in apostrophes
+
+
+# --------------------------------------------------------------------------- #
+# a backward reference (DSN=*.stepname.ddname) is a pointer, not a dataset name
+# --------------------------------------------------------------------------- #
+
+def _edges(job) -> set:
+    return {(e["from"], e["to"], e["dataset"]) for e in build_jcl_lineage(job)["dataflow"]}
+
+
+def test_a_referback_binds_the_dataset_the_earlier_dd_names():
+    """Published as coded, the two steps looked like they touched two datasets and the
+    edge between them was never drawn."""
+    job, b = _bindings("//J JOB\n"
+                       "//STEP010 EXEC PGM=SORT\n"
+                       "//SORTOUT DD DSN=A.B,DISP=(NEW,PASS)\n"
+                       "//STEP015 EXEC PGM=X\n"
+                       "//IN DD DSN=*.STEP010.SORTOUT,DISP=(OLD,DELETE)\n")
+    assert b[("STEP015", "IN")]["dataset"] == "A.B"
+    assert ("STEP010", "STEP015", "A.B") in _edges(job)
+    assert not any(d.startswith("*.") for d in _art_by_name(job))
+    assert job.flags == []
+
+
+def test_a_one_part_referback_names_a_dd_of_its_own_step():
+    _, b = _bindings("//J JOB\n//S EXEC PGM=X\n"
+                     "//SYSUT1 DD DSN=A.B,DISP=SHR\n"
+                     "//SYSUT2 DD DSN=*.SYSUT1,DISP=SHR\n")
+    assert b[("S", "SYSUT2")]["dataset"] == "A.B"
+
+
+_RPROC = ("//P PROC\n"
+          "//STEP1 EXEC PGM=X\n"
+          "//OUT DD DSN=&HLQ..WORK,DISP=(NEW,PASS)\n"
+          "//STEP2 EXEC PGM=Y\n"
+          "//IN DD DSN=*.STEP1.OUT,DISP=(OLD,PASS)\n")
+
+
+def test_a_three_part_referback_reaches_into_an_execed_procs_step():
+    job, b = _bindings("//J JOB\n//RUN EXEC P,HLQ=PROD\n"
+                       "//S2 EXEC PGM=Z\n"
+                       "//IN DD DSN=*.RUN.STEP1.OUT,DISP=(OLD,DELETE)\n",
+                       resolver={"P": _RPROC}.get)
+    assert b[("S2", "IN")]["dataset"] == "PROD.WORK"
+    assert ("RUN.STEP1", "S2", "PROD.WORK") in _edges(job)
+
+
+def test_a_proc_body_refers_back_to_its_own_step_by_the_procs_step_name():
+    """Inside a PROC a sibling step is named as the PROC names it, while the expanded
+    step is `invocation.procstep` - matched against the expanded name alone, every
+    referback written in a PROC body stayed a pointer."""
+    job, b = _bindings("//J JOB\n//RUN EXEC P,HLQ=PROD\n", resolver={"P": _RPROC}.get)
+    assert b[("RUN.STEP2", "IN")]["dataset"] == "PROD.WORK"
+    assert ("RUN.STEP1", "RUN.STEP2", "PROD.WORK") in _edges(job)
+    assert job.flags == []
+
+
+def test_a_bare_proc_members_own_referback_is_resolved():
+    _, b = _bindings(_RPROC.replace("&HLQ.", "PROD"))
+    assert b[("P.STEP2", "IN")]["dataset"] == "PROD.WORK"
+
+
+def test_a_proc_run_twice_resolves_each_referback_within_its_own_invocation():
+    _, b = _bindings("//J JOB\n//RUN1 EXEC P,HLQ=PROD\n//RUN2 EXEC P,HLQ=TEST\n",
+                     resolver={"P": _RPROC}.get)
+    assert b[("RUN1.STEP2", "IN")]["dataset"] == "PROD.WORK"
+    assert b[("RUN2.STEP2", "IN")]["dataset"] == "TEST.WORK"
+
+
+def test_a_referback_on_a_proc_dd_override_is_read_in_the_jobs_scope():
+    _, b = _bindings("//J JOB\n//S0 EXEC PGM=W\n"
+                     "//OUT DD DSN=JOB.LEVEL,DISP=(NEW,PASS)\n"
+                     "//RUN EXEC P,HLQ=PROD\n"
+                     "//STEP2.IN DD DSN=*.S0.OUT\n",
+                     resolver={"P": _RPROC}.get)
+    assert b[("RUN.STEP2", "IN")]["dataset"] == "JOB.LEVEL"
+
+
+def test_a_referback_carries_the_generation_and_the_member():
+    _, b = _bindings("//J JOB\n//S1 EXEC PGM=X\n"
+                     "//OUT DD DSN=PROD.A.GDG(+1),DISP=(NEW,CATLG)\n"
+                     "//LIB DD DSN=PROD.CNTL(CARD1),DISP=SHR\n"
+                     "//S2 EXEC PGM=Y\n"
+                     "//IN DD DSN=*.S1.OUT,DISP=SHR\n"
+                     "//CARDS DD DSN=*.S1.LIB,DISP=SHR\n")
+    assert (b[("S2", "IN")]["dataset"], b[("S2", "IN")]["generation"]) == ("PROD.A.GDG", "+1")
+    assert (b[("S2", "CARDS")]["dataset"], b[("S2", "CARDS")]["member"]) == ("PROD.CNTL",
+                                                                              "CARD1")
+
+
+def test_a_referback_to_a_referback_resolves_through_it():
+    _, b = _bindings("//J JOB\n//S1 EXEC PGM=X\n//OUT DD DSN=A.B,DISP=(NEW,PASS)\n"
+                     "//S2 EXEC PGM=Y\n//MID DD DSN=*.S1.OUT,DISP=(OLD,PASS)\n"
+                     "//S3 EXEC PGM=Z\n//IN DD DSN=*.S2.MID,DISP=(OLD,DELETE)\n")
+    assert b[("S3", "IN")]["dataset"] == "A.B"
+
+
+def test_a_control_card_dataset_named_by_referback_is_still_read():
+    lib = {"PARM.LIB(SORTCRD)": "  SORT FIELDS=(1,8,CH,A)\n"}
+    job = parse_jcl("//J JOB\n//S1 EXEC PGM=IEFBR14\n"
+                    "//CARDS DD DSN=PARM.LIB(SORTCRD),DISP=SHR\n"
+                    "//S2 EXEC PGM=SORT\n"
+                    "//SYSIN DD DSN=*.S1.CARDS,DISP=SHR\n", resolver=lib.get)
+    sysin = next(dd for s in job.steps for dd in s.dds if dd.ddname == "SYSIN")
+    assert sysin.control and sysin.control["sortFields"] == "1,8,CH,A"
+
+
+def test_a_referback_to_an_unknown_step_stays_as_written_and_is_flagged():
+    job, b = _bindings("//J JOB\n//S EXEC PGM=X\n//IN DD DSN=*.NOSTEP.X,DISP=SHR\n")
+    assert b[("S", "IN")]["dataset"] == "*.NOSTEP.X"
+    assert any("*.NOSTEP.X" in f for f in job.flags)
+
+
+def test_a_referback_to_a_later_dd_is_not_resolved():
+    """It is a BACKWARD reference: the DD it names has to come first."""
+    job, b = _bindings("//J JOB\n//S1 EXEC PGM=X\n//IN DD DSN=*.S2.OUT,DISP=SHR\n"
+                       "//S2 EXEC PGM=Y\n//OUT DD DSN=A.B,DISP=(NEW,PASS)\n")
+    assert b[("S1", "IN")]["dataset"] == "*.S2.OUT"
+    assert any("*.S2.OUT" in f for f in job.flags)
+
+
+def test_a_referback_to_a_dd_with_no_dataset_is_flagged_not_guessed():
+    job, b = _bindings("//J JOB\n//S1 EXEC PGM=X\n//RPT DD SYSOUT=*\n"
+                       "//S2 EXEC PGM=Y\n//IN DD DSN=*.S1.RPT,DISP=SHR\n")
+    assert b[("S2", "IN")]["dataset"] == "*.S1.RPT"
+    assert any("*.S1.RPT" in f for f in job.flags)
+
+
+def test_the_example_resolves_its_quoted_symbols_and_its_referbacks():
+    job = _job("refback.jcl")
+    b = {(x["step"], x["ddname"]): x for x in build_jcl_lineage(job)["ddBindings"]}
+    assert b[("NIGHTLY.SORT", "SORTIN")]["dataset"] == "PROD.SALES.DAILY"
+    assert b[("NIGHTLY.REPORT", "INFILE")]["dataset"] == "PROD.SALES.SORTED"
+    assert b[("ARCHIVE", "SYSUT1")]["dataset"] == "PROD.SALES.SORTED"
+    assert (b[("ARCHIVE", "SYSUT2")]["dataset"],
+            b[("ARCHIVE", "SYSUT2")]["generation"]) == ("PROD.SALES.ARCHIVE", "+1")
+    assert {("NIGHTLY.SORT", "NIGHTLY.REPORT", "PROD.SALES.SORTED"),
+            ("NIGHTLY.SORT", "ARCHIVE", "PROD.SALES.SORTED")} <= _edges(job)
+    assert job.flags == []

@@ -104,6 +104,16 @@ called EXEC's — so the condition a step actually runs under is `invokedCond` i
 else `cond`. A `COND.procstep=` naming no step of the PROC, or `COND=` and
 `COND.procstep=` coded together, is flagged. See `examples/proccond.jcl`.
 
+**A DD that names its dataset indirectly is followed to the name.** A symbol's value
+coded in apostrophes (`HLQ='PROD'`, `GEN='+1'`) holds what is between them — the
+apostrophes delimit it — so `&HLQ..A.B` is `PROD.A.B` and `X.GDG(&GEN)` is still split
+into its base and generation. A backward reference (`DSN=*.ddname`, `*.stepname.ddname`,
+`*.stepname.procstepname.ddname`) is a pointer to the dataset an earlier DD names, and
+the binding carries that dataset, generation and member, which is what lets `dataflow`
+see two steps sharing it. Inside a PROC a sibling step is named as the PROC names it. A
+referback naming no earlier DD with a dataset name is left as written and flagged. See
+`examples/refback.jcl`.
+
 ## The one place it meets the COBOL tool
 
 `bind_cobol_artifacts(manifest, jobs)` joins a COBOL program's file ddnames to the

@@ -49,7 +49,8 @@ Resolver = Callable[[str], Optional[str]]
 @dataclass
 class DDSegment:
     """One dataset in a DD (a DD may concatenate several)."""
-    dsn: Optional[str] = None            # DSN as written, after symbolic substitution
+    dsn: Optional[str] = None            # DSN after symbolic substitution; a referback
+                                         # (*.step.dd) is the dataset it points at
     disp: List[str] = field(default_factory=list)   # [status, normal, abnormal]
     sysout: Optional[str] = None
     instream: bool = False               # DD * / DD DATA
@@ -369,6 +370,21 @@ def _substitute(text: str, symbols: Dict[str, str]) -> Tuple[str, List[str]]:
     return out, unresolved
 
 
+def _symbol_value(v: str) -> str:
+    """The value a symbol holds, from the text coded for it. A value with special
+    characters is coded in apostrophes (``HLQ='PROD'``, ``GEN='+1'``): they delimit the
+    value and are not part of it, and an apostrophe inside it is coded doubled. Kept, they
+    were substituted into the DSN verbatim - ``'PROD'.A.B``, a name no catalog holds - and
+    they hid a generation or a member from the patterns that split it off the name.
+
+    Only what is stored as a symbol comes through here. `_operand_map` keeps returning
+    operands as coded, because ``PARM='A,B'`` is read from the same map."""
+    v = v.strip()
+    if len(v) >= 2 and v[0] == v[-1] == "'":
+        v = v[1:-1].replace("''", "'")
+    return v
+
+
 # --------------------------------------------------------------------------- #
 # DD parsing
 # --------------------------------------------------------------------------- #
@@ -427,6 +443,38 @@ def _merge_dd_segment(base: DDSegment, ov: DDSegment) -> DDSegment:
         unresolved_symbols=ov.unresolved_symbols or base.unresolved_symbols,
         raw=f"{base.raw} | override: {ov.raw}",
     )
+
+
+def _resolve_referbacks(steps: List[Step]) -> List[Tuple[Step, DD, DDSegment]]:
+    """Replace each backward reference - ``DSN=*.ddname``, ``*.stepname.ddname``,
+    ``*.stepname.procstepname.ddname`` - with the dataset the DD it points at names, and
+    return the ones that point at no earlier DD carrying a dataset name, left as written.
+
+    A referback is a pointer, not a name. Published as coded, two steps sharing one
+    dataset read as two datasets, and the dataflow edge between them is never drawn. What
+    is copied is the first segment's DSN, generation and member; the DD has to come
+    first, because the reference is a backward one.
+
+    Step names are matched as they stand in ``steps``, so this runs once per PROC body -
+    where a sibling step is named as the PROC names it - and again on whatever EXECed
+    that PROC, where the same steps are `invocation.procstep` and a reference the body
+    could not resolve in its own scope gets its chance."""
+    earlier: Dict[Tuple[str, str], DDSegment] = {}
+    unresolved: List[Tuple[Step, DD, DDSegment]] = []
+    for step in steps:
+        for dd in step.dds:
+            for seg in dd.segments:
+                if not (seg.dsn or "").startswith("*."):
+                    continue
+                stepname, _, ddname = seg.dsn[2:].rpartition(".")
+                target = earlier.get((stepname or step.name, ddname))
+                if target is None or not target.dsn or target.dsn.startswith("*."):
+                    unresolved.append((step, dd, seg))
+                else:
+                    seg.dsn, seg.gdg, seg.member = target.dsn, target.gdg, target.member
+            if dd.segments:
+                earlier.setdefault((step.name, dd.ddname), dd.segments[0])
+    return unresolved
 
 
 def _dd_direction(seg: DDSegment) -> Optional[str]:
@@ -980,6 +1028,12 @@ class _Parser:
                 f"overrides are applied")
             for pname in list(self.job.procs):
                 self.job.steps.extend(self._expand_proc(pname, pname, {}, None))
+        # Before the control cards: a card DD may itself be a referback.
+        for step, dd, seg in _resolve_referbacks(self.job.steps):
+            msg = (f"step {step.name}: DD {dd.ddname} refers back to {seg.dsn}, which "
+                   f"names no earlier DD with a dataset name - the dataset is not known")
+            if msg not in self.job.flags:
+                self.job.flags.append(msg)
         self._attach_control_cards()
         return self.job
 
@@ -1087,7 +1141,8 @@ class _Parser:
             if op == "PROC" and log.name:
                 # //NAME PROC ... PEND  (definition). Capture defaults.
                 defaults, _ = _operand_map(log.operands)
-                pd = ProcDef(name=log.name, defaults={k: v for k, v in defaults.items()})
+                pd = ProcDef(name=log.name,
+                             defaults={k: _symbol_value(v) for k, v in defaults.items()})
                 collecting_proc = pd
                 self.job.procs[log.name] = pd
                 # a bare PROC member (no JOB) - remember, so callers know it is a PROC.
@@ -1102,7 +1157,7 @@ class _Parser:
             if op == "SET":
                 kw, _ = _operand_map(log.operands)
                 for k, v in kw.items():
-                    sub, _ = _substitute(v, self.job.symbols)
+                    sub, _ = _substitute(_symbol_value(v), self.job.symbols)
                     self.job.symbols[k] = sub
                 idx += 1
                 continue
@@ -1230,7 +1285,7 @@ class _Parser:
         symbols = dict(pd.defaults)
         symbols.update(self.job.symbols)
         for k, v in overrides.items():
-            sub, _ = _substitute(v, symbols)
+            sub, _ = _substitute(_symbol_value(v), symbols)
             symbols[k] = sub
 
         self._expanding.add(procname)
@@ -1274,6 +1329,8 @@ class _Parser:
         self.job.symbols = dict(symbols)
         stmts = self._logical_with_data()
         self._build(stmts)
+        # In the body's own scope; what is left is the invoking member's to resolve or flag.
+        _resolve_referbacks(self.job.steps)
         return self.job
 
     def _expand_include(self, member: str, cur_step: Optional[Step]) -> None:
@@ -1291,7 +1348,7 @@ class _Parser:
             if op == "SET":
                 kw, _ = _operand_map(log.operands)
                 for k, v in kw.items():
-                    sub, _ = _substitute(v, self.job.symbols)
+                    sub, _ = _substitute(_symbol_value(v), self.job.symbols)
                     self.job.symbols[k] = sub
             elif op == "JCLLIB":
                 kw, _ = _operand_map(log.operands)
@@ -1383,7 +1440,7 @@ def _parse_proc_member(text: str, procname: str) -> ProcDef:
     for log in merged:
         if log.op == "PROC":
             kw, _ = _operand_map(log.operands)
-            defaults.update(kw)
+            defaults.update({k: _symbol_value(v) for k, v in kw.items()})
             continue
         if log.op == "PEND":
             continue
