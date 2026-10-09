@@ -1608,3 +1608,60 @@ def test_a_resolver_that_takes_only_the_name_still_resolves():
     job = parse_jcl(KINDS_JOB, resolver=resolver)
     assert "PROCPGM" in [s.pgm for s in job.steps]
     assert not [f for f in job.flags if "resolver raised" in f], job.flags
+
+
+# --------------------------------------------------------------------------- #
+# batch-26 ledger item 63: a Control-M AutoEdit member is a dependency of the job
+# --------------------------------------------------------------------------- #
+
+def test_an_autoedit_include_is_reported_as_a_dependency_of_the_job():
+    """`//* %%INCLIB lib %%INCMEM member` is a comment to JES and an instruction to
+    Control-M, read when it submits the job. Skipped as a comment, nothing said the job
+    depends on that member."""
+    row = _art_by_name(_job("autoedit.jcl"))["SITE.CTM.AUTOEDIT(SITEVARS)"]
+    assert row["kind"] == "autoedit-member"
+    assert row["dependency"] == "compile-time"
+    assert row["identity"] == "global"
+
+
+def test_a_dataset_name_carrying_an_autoedit_variable_is_flagged_with_its_member():
+    """`PARM.LIB(UNL%%SSID)` is not a member name until Control-M expands it; the flag
+    says where the value lives, so the gap reads as one library, not a missing card."""
+    job = _job("autoedit.jcl")
+    for ddname in ("SYSTSIN", "SYSIN"):
+        hits = [f for f in job.flags if f"DD {ddname} " in f and "%%SSID" in f]
+        assert hits, job.flags
+        assert all("SITE.CTM.AUTOEDIT(SITEVARS)" in f for f in hits), hits
+
+
+def test_a_name_that_is_not_one_until_control_m_expands_it_is_never_asked_for():
+    asked = []
+    src = ("//J        JOB (A),'T'\n"
+           "//S1       EXEC PGM=SORT\n"
+           "//SYSIN    DD DSN=PARM.LIB(XX%%SSID),DISP=SHR\n"
+           "//S2       EXEC PGM=SORT\n"
+           "//SYSIN    DD DSN=PARM.LIB(PLAIN),DISP=SHR\n")
+    job = parse_jcl(src, resolver=lambda name, kind=None: asked.append(name))
+    assert asked == ["PARM.LIB(PLAIN)"]
+    assert not [f for f in job.flags if "%%" in f and "resolver" in f], job.flags
+
+
+def test_an_autoedit_variable_with_no_include_in_the_job_says_so():
+    src = ("//J        JOB (A),'T'\n"
+           "//S1       EXEC PGM=P\n"
+           "//IN       DD DSN=%%HLQ.DATA,DISP=SHR\n")
+    job = parse_jcl(src)
+    assert any("%%HLQ" in f and "loads no AutoEdit member" in f for f in job.flags)
+    assert not [r for r in build_jcl_artifacts(job)["artifacts"]
+                if r["kind"] == "autoedit-member"]
+
+
+def test_a_job_without_autoedit_is_unchanged():
+    """No AutoEdit row and no AutoEdit flag on any other example - their bytes are
+    pinned by tools/byteproof.py besides."""
+    for path in sorted(EXAMPLES.glob("*")):
+        if path.name == "autoedit.jcl":
+            continue
+        job = parse_jcl(path.read_text(), source_name=path.name)
+        assert not job.autoedit_members, path.name
+        assert not [f for f in job.flags if "AutoEdit" in f], path.name

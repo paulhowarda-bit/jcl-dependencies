@@ -566,6 +566,18 @@ def build_jcl_artifacts(job: Job, *, synonyms: Optional[SynonymLookup] = None) -
             "needs": ("the library that holds this INCLUDE member; its content is part of "
                       "the effective JCL")})
 
+    # Control-M AutoEdit members: read by Control-M when it submits the job, before JES
+    # reads a line - so, like a PROC, assembled into the job before it can run.
+    for member in job.autoedit_members:
+        artifacts.append({
+            "artifact": member, "kind": "autoedit-member", "dependency": "compile-time",
+            "identity": "global",
+            "resolvedBy": "Control-M AutoEdit (%%INCLIB / %%INCMEM), when the job is "
+                          "submitted",
+            "needs": ("this member's %%SET statements: they define the %%variables in the "
+                      "job's JCL, and a dataset name still carrying one is not known until "
+                      "they are read")})
+
     # spool (SYSOUT) and DUMMY are noted, not treated as related artifacts
     excluded: List[dict] = []
     spool_seen, dummy_seen = set(), set()
@@ -582,7 +594,7 @@ def build_jcl_artifacts(job: Job, *, synonyms: Optional[SynonymLookup] = None) -
                              "reason": "DUMMY - no dataset"})
 
     _CLASS_ORDER = {"dataset": 0, "control-card": 1, "db2-table": 2, "db2-tablespace": 3,
-                    "program": 4, "proc": 5, "include-member": 6}
+                    "program": 4, "proc": 5, "include-member": 6, "autoedit-member": 7}
     artifacts.sort(key=lambda r: (_CLASS_ORDER.get(r["kind"], 9), r["artifact"]))
 
     return {

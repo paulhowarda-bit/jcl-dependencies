@@ -32,6 +32,14 @@ direction-ambiguous and noted; dynamic allocation (SVC 99, ``BPXWDYN``) and sche
 symbolics are not statically knowable and are flagged; a ``DDNAME=`` reference is followed
 to the later DD that defines it, and flagged where none does; GDG relative generations are
 normalized to their base (the stable identity) with the generation recorded.
+
+**Control-M AutoEdit.** ``//* %%INCLIB lib %%INCMEM member`` is a comment to JES and an
+instruction to Control-M, which reads that member's ``%%SET`` statements when it submits
+the job and substitutes the ``%%variables`` they define before JES reads a line. So the
+member is a dependency of the job (``Job.autoedit_members``), and a dataset name still
+carrying a ``%%variable`` is not a name until Control-M has expanded it: it is flagged
+with the member its value comes from, and never asked of the resolver. The member itself
+is not read, so its values are not in the model.
 """
 
 from __future__ import annotations
@@ -121,6 +129,9 @@ class Job:
     procs: Dict[str, ProcDef] = field(default_factory=dict)
     includes: List[str] = field(default_factory=list)
     jcllib: List[str] = field(default_factory=list)
+    # Control-M AutoEdit members the job loads when it is submitted, as LIB(MEMBER) - from
+    # `//* %%INCLIB lib %%INCMEM member` cards in the job member itself (_AUTOEDIT_INCLUDE).
+    autoedit_members: List[str] = field(default_factory=list)
     flags: List[str] = field(default_factory=list)
     notes: List[str] = field(default_factory=list)
 
@@ -135,6 +146,16 @@ class Job:
 _STMT = re.compile(r"^//(\S*)\s+(\S+)(?:\s+(.*))?$")
 _CONT = re.compile(r"^//\s+(\S.*)$")           # blank name field -> continuation/override-less
 _COMMENT = re.compile(r"^//\*")
+
+# A Control-M AutoEdit include rides on a comment card because JES must never see it:
+# Control-M reads it when it SUBMITS the job, loads the member's %%SET statements, and
+# substitutes the %%variables they define before JES reads a line. Only the job member's
+# own cards count - a cataloged PROC or an INCLUDE member is expanded by JES, after
+# Control-M has finished with the job.
+_AUTOEDIT_INCLUDE = re.compile(r"^//\*.*?%%INCLIB\s+(\S+)\s+%%INCMEM\s+(\S+)", re.I)
+# A Control-M AutoEdit variable still in the JCL (`%%DB2`). `%%.`, the concatenation
+# operator, names none.
+_AUTOEDIT_VAR = re.compile(r"%%([A-Z0-9_#@$]+)", re.I)
 
 
 # The IF statement is the one exception to the first-blank rule: its operand is a
@@ -1151,6 +1172,7 @@ class _Parser:
             if msg not in self.job.flags:
                 self.job.flags.append(msg)
         self._attach_control_cards()
+        self._flag_autoedit_names()
         return self.job
 
     def _attach_control_cards(self) -> None:
@@ -1179,13 +1201,46 @@ class _Parser:
                         lines.extend(seg.lines)
                     elif seg.dsn and not seg.sysout:
                         name = seg.dsn + (f"({seg.member})" if seg.member else "")
-                        got = self._resolve(name, "control-card dataset")
-                        if got is not None:
-                            lines.extend(got.splitlines())
+                        # Not a name yet while it carries a %%variable: Control-M has not
+                        # expanded it, so there is nothing to ask for, and
+                        # _flag_autoedit_names says where its value lives instead.
+                        if not _AUTOEDIT_VAR.search(name):
+                            got = self._resolve(name, "control-card dataset")
+                            if got is not None:
+                                lines.extend(got.splitlines())
                 if lines:
                     ctl = _parse_control_cards(step.pgm, lines, dd.ddname)
                     if ctl:
                         dd.control = ctl
+
+    def _flag_autoedit_names(self) -> None:
+        """Flag every dataset name a Control-M AutoEdit variable is still in, naming the
+        member this job loads its AutoEdit values from. Unflagged, ``LIB(XX%%DB2)`` reads
+        as a control-card member nobody could supply - and a job whose whole gap is one
+        AutoEdit library reads as many missing members."""
+        if self.job.autoedit_members:
+            where = (f"from the %%SET statements in "
+                     f"{', '.join(self.job.autoedit_members)}, which this job's "
+                     f"%%INCLIB/%%INCMEM loads")
+        else:
+            where = ("and this job loads no AutoEdit member (%%INCLIB/%%INCMEM), so "
+                     "where its value is defined is not in this source")
+        for step in self.job.steps:
+            for dd in step.dds:
+                for seg in dd.segments:
+                    name = (seg.dsn or "") + (f"({seg.member})" if seg.member else "")
+                    found = list(dict.fromkeys(
+                        v.upper() for v in _AUTOEDIT_VAR.findall(name)))
+                    if not found:
+                        continue
+                    one = len(found) == 1
+                    msg = (f"step {step.name}: DD {dd.ddname} dataset {name} carries "
+                           f"Control-M AutoEdit variable{'' if one else 's'} "
+                           f"{', '.join('%%' + v for v in found)} - Control-M sets "
+                           f"{'it' if one else 'them'} when it submits the job, {where}; "
+                           f"the dataset name is not known until then")
+                    if msg not in self.job.flags:
+                        self.job.flags.append(msg)
 
     def _logical_with_data(self) -> List[dict]:
         """Merge continuations AND capture instream data. Each item is a dict:
@@ -1200,6 +1255,11 @@ class _Parser:
                 i += 1
                 continue
             if _COMMENT.match(line):
+                inc = _AUTOEDIT_INCLUDE.match(line)
+                if inc:
+                    ref = f"{inc.group(1).upper()}({inc.group(2).upper()})"
+                    if ref not in self.job.autoedit_members:
+                        self.job.autoedit_members.append(ref)
                 i += 1
                 continue
             m = _STMT.match(line)
