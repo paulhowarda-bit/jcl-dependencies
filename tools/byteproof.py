@@ -23,6 +23,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import re
 import sys
 import traceback
 from pathlib import Path
@@ -65,7 +66,11 @@ def normalize(text: str, run_dir: Path = None) -> str:
         for form in (str(root), str(root).replace("\\", "/"),
                      str(root).replace("\\", "\\\\")):
             text = text.replace(form, token)
-    return text
+    # The rest of such a path keeps its platform's separator - `<RUNDIR>\\deps\\X.txt` in
+    # the JSON on Windows, `<RUNDIR>/deps/X.txt` elsewhere - so goldens recorded on one
+    # failed on the other for every job that retrieved a member. Fold it to `/`.
+    return re.sub(r'<(?:RUNDIR|EXAMPLES|REPO)>[^"]*',
+                  lambda m: m.group(0).replace("\\\\", "/"), text)
 
 
 def digest(text: str) -> str:
