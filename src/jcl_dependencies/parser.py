@@ -1048,6 +1048,11 @@ class _Parser:
         # last step, which is a different one whenever the named statement was an
         # override. None straight after an EXEC.
         self._concat: Optional[Tuple[DD, int, Step, bool]] = None
+        # The PROC step the last `//procstep.dd DD` of this invocation named. A DD that
+        # names no step modifies THAT step, and the FIRST step of the PROC when none has
+        # named one yet (z/OS MVS JCL Reference, "Location in the JCL") - never the last
+        # step, which is where they all once went. None straight after an EXEC.
+        self._modify_step: Optional[Step] = None
 
     # -- resolver plumbing --------------------------------------------------
     def _resolve(self, name: str, what: str) -> Optional[str]:
@@ -1278,11 +1283,12 @@ class _Parser:
             if op == "EXEC":
                 cur_step, cur_seg = None, None
                 self._concat = None
+                self._modify_step = None
                 new_steps = self._make_steps(log)
                 self._attach_step_context(new_steps)
                 self.job.steps.extend(new_steps)
                 self._invocation = new_steps    # overrides bind to THIS invocation
-                cur_step = new_steps[-1] if new_steps else None
+                cur_step = new_steps[0] if new_steps else None
                 idx += 1
                 continue
             if op == "DD":
@@ -1443,11 +1449,12 @@ class _Parser:
                 self._if_pop()
             elif op == "EXEC":
                 self._concat = None
+                self._modify_step = None
                 steps = self._make_steps(log)
                 self._attach_step_context(steps)
                 self.job.steps.extend(steps)
                 self._invocation = steps
-                step = steps[-1] if steps else step
+                step = steps[0] if steps else step
             elif op == "DD":
                 self._handle_dd(log, step)
 
@@ -1456,24 +1463,30 @@ class _Parser:
         data that follows belongs to - or None for a DD with no step to belong to."""
         if cur_step is None:
             return None
+        # A DD naming no PROC step goes to the step the previous override named.
+        step = self._modify_step or cur_step
         ddname = log.name
         # concatenation: a DD with a BLANK name is the next dataset of the DD the last
         # named DD statement addressed.
         if ddname == "":
-            if self._concat is None and cur_step.dds:
-                last = cur_step.dds[-1]
-                self._concat = (last, len(last.segments), cur_step, False)
+            if self._concat is None and step.dds:
+                last = step.dds[-1]
+                self._concat = (last, len(last.segments), step, False)
             if self._concat is not None:
                 return self._concatenate(log)
         # a PROC-step override: //procstep.ddname DD ...
         if "." in ddname:
             return self._apply_override(ddname, log)
-        dd = DD(ddname=ddname)
         seg = _parse_dd_segment(log.operands, self.job.symbols)
+        self._note_symbols(seg, step)
+        if step.proc_step:
+            # Coded after the EXEC of a PROC it modifies the PROC, exactly as a qualified
+            # one does: an override where the step has a DD of that name, else added.
+            return self._modify_dd(step, ddname, seg)
+        dd = DD(ddname=ddname)
         dd.segments.append(seg)
-        self._note_symbols(seg, cur_step)
-        cur_step.dds.append(dd)
-        self._concat = (dd, 1, cur_step, False)
+        step.dds.append(dd)
+        self._concat = (dd, 1, step, False)
         return seg
 
     def _concatenate(self, log: _LogLine) -> DDSegment:
@@ -1510,6 +1523,12 @@ class _Parser:
             self._concat = (DD(ddname=ddname, segments=[seg]), 1, Step(name=procstep),
                             False)
             return seg
+        self._modify_step = target
+        return self._modify_dd(target, ddname, seg)
+
+    def _modify_dd(self, target: Step, ddname: str, seg: DDSegment) -> DDSegment:
+        """Apply a modifying DD statement to the PROC step it addresses: an override of
+        the step's DD of that name, or a DD added to the step when it has none."""
         for dd in target.dds:
             if dd.ddname == ddname:
                 # An override MERGES: the parameters it names replace the PROC DD's, and

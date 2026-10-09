@@ -1291,6 +1291,134 @@ def test_instream_data_after_an_override_belongs_to_the_overridden_dd():
     assert by[("STEP1.PS2", "LAST")].instream_lines == []
 
 
+_TWO_STEP_PROC = ("//TWO PROC\n"
+                  "//PS1 EXEC PGM=A\n"
+                  "//X   DD DSN=P.X,DISP=SHR\n"
+                  "//PS2 EXEC PGM=B\n"
+                  "//Y   DD DSN=P.Y,DISP=SHR\n"
+                  "//    PEND\n")
+
+
+def _dds_by_step(job):
+    return [(s.name, [d.ddname for d in s.dds]) for s in job.steps]
+
+
+def test_a_dd_naming_no_proc_step_is_added_to_the_first_step_of_the_proc():
+    """z/OS MVS JCL Reference, 'Location in the JCL': a modifying statement that names no
+    step applies to the FIRST step of the procedure while no earlier one has named a
+    step. It was added to the last step."""
+    job = parse_jcl("//J JOB\n" + _TWO_STEP_PROC + "//STEP1 EXEC TWO\n"
+                    "//ADDED DD DSN=J.ADDED,DISP=SHR\n")
+    assert _dds_by_step(job) == [("STEP1.PS1", ["X", "ADDED"]), ("STEP1.PS2", ["Y"])]
+
+
+def test_a_dd_naming_no_proc_step_overrides_the_first_steps_dd_of_that_name():
+    """Where the first step has a DD of that name it is an override like any other: it
+    merges (the PROC's DISP survives, so the direction does), it replaces the first
+    dataset only, and the unnamed DD after it addresses the second. It was a second,
+    unmerged DD of that name on the last step."""
+    proc = ("//TWO PROC\n//PS1 EXEC PGM=A\n//IN DD DSN=P.IN1,DISP=SHR\n"
+            "//   DD DSN=P.IN2,DISP=SHR\n//   DD DSN=P.IN3,DISP=SHR\n"
+            "//PS2 EXEC PGM=B\n//Y DD DSN=P.Y,DISP=SHR\n// PEND\n")
+    job, _, rows = _rows("//J JOB\n" + proc + "//STEP1 EXEC TWO\n"
+                         "//IN DD DSN=J.IN1\n"
+                         "//   DD DSN=J.IN2\n")
+    assert rows == [("STEP1.PS1", "IN", 1, "J.IN1", "input"),
+                    ("STEP1.PS1", "IN", 2, "J.IN2", "input"),
+                    ("STEP1.PS1", "IN", 3, "P.IN3", "input"),
+                    ("STEP1.PS2", "Y", None, "P.Y", "input")]
+    assert job.steps[0].dds[0].override is True
+
+
+def test_a_dd_naming_no_proc_step_follows_the_step_the_previous_one_named():
+    """The same topic: it applies to the step named in the previous overriding or added
+    statement - forwards and back - and to the first step only until one is named."""
+    job = parse_jcl("//J JOB\n" + _TWO_STEP_PROC + "//STEP1 EXEC TWO\n"
+                    "//FIRST DD DSN=J.FIRST,DISP=SHR\n"
+                    "//PS2.Y DD DSN=J.Y\n"
+                    "//NEW   DD DSN=J.NEW,DISP=SHR\n"
+                    "//PS1.X DD DSN=J.X\n"
+                    "//BACK  DD DSN=J.BACK,DISP=SHR\n")
+    assert _dds_by_step(job) == [("STEP1.PS1", ["X", "FIRST", "BACK"]),
+                                 ("STEP1.PS2", ["Y", "NEW"])]
+
+
+def test_the_step_a_dd_names_does_not_outlive_its_invocation():
+    job = parse_jcl("//J JOB\n" + _TWO_STEP_PROC + "//STEP1 EXEC TWO\n"
+                    "//PS2.Y DD DSN=J.Y\n"
+                    "//STEP2 EXEC TWO\n"
+                    "//ADDED DD DSN=J.ADDED,DISP=SHR\n")
+    assert _dds_by_step(job) == [("STEP1.PS1", ["X"]), ("STEP1.PS2", ["Y"]),
+                                 ("STEP2.PS1", ["X", "ADDED"]), ("STEP2.PS2", ["Y"])]
+
+
+def test_instream_data_after_a_dd_naming_no_proc_step_overrides_the_first_steps_dd():
+    """``//SYSIN DD *`` after the EXEC of a PROC whose first step has a SYSIN: the cards
+    are that step's SYSIN, not a second SYSIN on the last step."""
+    proc = ("//TWO PROC\n//PS1 EXEC PGM=SORT\n//SYSIN DD DUMMY\n"
+            "//PS2 EXEC PGM=IEFBR14\n//LAST DD DSN=P.LAST,DISP=SHR\n// PEND\n")
+    job = parse_jcl("//J JOB\n" + proc + "//STEP1 EXEC TWO\n"
+                    "//SYSIN DD *\n  SORT FIELDS=COPY\n/*\n")
+    assert _dds_by_step(job) == [("STEP1.PS1", ["SYSIN"]), ("STEP1.PS2", ["LAST"])]
+    assert job.steps[0].dds[0].instream_lines == ["  SORT FIELDS=COPY"]
+
+
+def test_a_concatenated_dd_added_to_a_proc_binds_as_the_ibm_example_says():
+    """z/OS MVS JCL Reference, 'References to concatenated data sets', its PROC example:
+    DD1 resolves to MYDSN1 and MYDSN4 is concatenated to MYDSN3; DDA resolves to MINE1 and
+    MINE4 is concatenated to MINE3. With INPUT sent to the last step, ``//S2.INPUT``
+    overrode it there: MYDSN1 and MYDSN4 were in no view, and DD1 was flagged as reading
+    something not in the JCL."""
+    job, _, rows = _rows(
+        "//J JOB\n"
+        "//TPROC  PROC\n"
+        "//S1     EXEC PGM=IEFBR14\n"
+        "//DD1    DD DDNAME=INPUT\n"
+        "//DD2    DD DSN=MYDSN2,DISP=SHR\n"
+        "//DD3    DD DSN=MYDSN3,DISP=SHR\n"
+        "//S2     EXEC PGM=IEFBR14\n"
+        "//DDA    DD DDNAME=INPUT\n"
+        "//DDB    DD DSN=MINE2,DISP=SHR\n"
+        "//DDC    DD DSN=MINE3,DISP=SHR\n"
+        "//       PEND\n"
+        "//STEP1  EXEC TPROC\n"
+        "//INPUT  DD DSN=MYDSN1,DISP=SHR\n"
+        "//       DD DSN=MYDSN4,DISP=SHR\n"
+        "//S2.INPUT DD DSN=MINE1,DISP=SHR\n"
+        "//       DD DSN=MINE4,DISP=SHR\n")
+    assert rows == [("STEP1.S1", "DD1", None, "MYDSN1", "input"),
+                    ("STEP1.S1", "DD2", None, "MYDSN2", "input"),
+                    ("STEP1.S1", "DD3", 1, "MYDSN3", "input"),
+                    ("STEP1.S1", "DD3", 2, "MYDSN4", "input"),
+                    ("STEP1.S2", "DDA", None, "MINE1", "input"),
+                    ("STEP1.S2", "DDB", None, "MINE2", "input"),
+                    ("STEP1.S2", "DDC", 1, "MINE3", "input"),
+                    ("STEP1.S2", "DDC", 2, "MINE4", "input")]
+    assert not any("no later DD statement" in f for f in job.flags)
+
+
+def test_a_dd_naming_no_proc_step_inside_an_include_goes_to_the_first_step_too():
+    """An INCLUDE member's statements are read where the INCLUDE stands - whether the
+    EXEC of the PROC is in the job or in the member itself."""
+    dd = "//EXTRA DD DSN=I.EXTRA,DISP=SHR\n"
+    members = {"DDONLY": dd, "CALLS": "//STEP1 EXEC TWO\n" + dd}
+    for body in ("//STEP1 EXEC TWO\n// INCLUDE MEMBER=DDONLY\n",
+                 "// INCLUDE MEMBER=CALLS\n"):
+        job = parse_jcl("//J JOB\n" + _TWO_STEP_PROC + body, resolver=members.get)
+        assert _dds_by_step(job) == [("STEP1.PS1", ["X", "EXTRA"]), ("STEP1.PS2", ["Y"])]
+
+
+def test_a_repeated_ddname_in_a_step_that_runs_a_program_is_not_an_override():
+    """Only a DD coded after the EXEC of a PROC modifies anything. In a PGM= step - and
+    under a PROC that did not resolve, whose DDs are not known - it stays as coded."""
+    for exec_ in ("PGM=A", "NOPROC"):
+        job = parse_jcl(f"//J JOB\n//S EXEC {exec_}\n"
+                        "//X DD DSN=A.X1,DISP=SHR\n//X DD DSN=A.X2,DISP=OLD\n")
+        assert [(d.ddname, d.override, [g.dsn for g in d.segments])
+                for d in job.steps[0].dds] == [("X", False, ["A.X1"]),
+                                               ("X", False, ["A.X2"])]
+
+
 def test_a_ddname_reference_takes_the_definition_a_later_dd_supplies():
     """``DDNAME=CARDS`` postpones SYSUT1 to the DD named CARDS; CARDS is not a ddname the
     step allocates."""
