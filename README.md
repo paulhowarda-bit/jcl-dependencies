@@ -153,6 +153,16 @@ before. The rules, each the system's own:
 `bind_cobol_artifacts` gives a file whose ddname is concatenated **`datasets`**, the list
 in read order, in place of `dataset`. See `examples/concat.jcl`.
 
+**A Control-M AutoEdit member is a dependency of the job.** `//* %%INCLIB lib %%INCMEM
+member` is a comment to JES and an instruction to Control-M, which reads that member's
+`%%SET` statements when it submits the job and substitutes the `%%variables` they define
+before JES sees a line. So the member is an `autoedit-member` row in the manifest
+(`compile-time`, like a PROC), and stage 2 asks for it. A dataset name still carrying a
+`%%variable` is not a name until Control-M expands it: it is never asked for, and is
+flagged with the member its value comes from - or, when the job loads no AutoEdit member,
+saying so. The member is not read, so its values are not in the model. See
+`examples/autoedit.jcl`.
+
 ## The one place it meets the COBOL tool
 
 `bind_cobol_artifacts(manifest, jobs)` joins a COBOL program's file ddnames to the
