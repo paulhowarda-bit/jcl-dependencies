@@ -16,10 +16,14 @@ reads where a caller-provided function can retrieve them, and produces a structu
 
 **The resolver.** Cataloged PROCs, ``INCLUDE`` members, and control-card datasets
 (``//SYSIN DD DSN=PARM.LIB(SORTCRD)``) live outside the JCL file. This module does NOT
-fetch them - the caller passes ``resolver``, a function ``resolver(name) -> text | None``,
-and this module calls it and substitutes what it returns. Anything the resolver cannot
-return is **flagged, never guessed** - the same rule the COBOL side follows for an
-unresolved ``CALL`` or a missing copybook.
+fetch them - the caller passes ``resolver``, a function
+``resolver(name, kind=...) -> text | None``, and this module calls it and substitutes what
+it returns. ``kind`` is what the member is, in the artifact manifest's words - ``proc``,
+``include-member`` or ``control-card`` - because the name alone does not say: one member
+name is often a PROC, a job and a control card at once, and only this parser knows which
+one an ``EXEC`` or a ``SYSIN DD`` meant. A resolver written as ``resolver(name)`` is called
+that way. Anything the resolver cannot return is **flagged, never guessed** - the same
+rule the COBOL side follows for an unresolved ``CALL`` or a missing copybook.
 
 **Honest limits, all surfaced in flags rather than guessed** (the hazards are enumerated in
 docs/mainframe-artifacts.md; this parser handles the common cases and flags the rest):
@@ -39,7 +43,8 @@ from typing import Callable, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
-Resolver = Callable[[str], Optional[str]]
+# Called as resolver(name, kind=...); one written as resolver(name) still works.
+Resolver = Callable[..., Optional[str]]
 
 
 # --------------------------------------------------------------------------- #
@@ -1019,11 +1024,17 @@ def _parse_control_cards(pgm: Optional[str], lines: List[str],
 
 def parse_jcl(text: str, resolver: Optional[Resolver] = None,
               source_name: str = "<jcl>") -> Job:
-    """Parse a JCL job or PROC member into a ``Job``. ``resolver(name) -> text | None`` is
-    the caller-provided retrieval for cataloged PROCs, INCLUDE members, and control-card
-    datasets; anything it cannot return is flagged, never guessed."""
+    """Parse a JCL job or PROC member into a ``Job``. ``resolver(name, kind=...) -> text |
+    None`` is the caller-provided retrieval for cataloged PROCs, INCLUDE members, and
+    control-card datasets; anything it cannot return is flagged, never guessed."""
     physical = text.splitlines()
     return _Parser(physical, resolver, source_name).parse()
+
+
+# What each _resolve caller is asking for, in the artifact manifest's kind words: the
+# resolver's `kind=`, which jcl_dependencies.prefetch turns into the estate request's type.
+_RESOLVE_KIND = {"PROC": "proc", "INCLUDE": "include-member",
+                 "control-card dataset": "control-card"}
 
 
 class _Parser:
@@ -1053,6 +1064,8 @@ class _Parser:
         # named one yet (z/OS MVS JCL Reference, "Location in the JCL") - never the last
         # step, which is where they all once went. None straight after an EXEC.
         self._modify_step: Optional[Step] = None
+        # Until a TypeError says otherwise - see _call_resolver.
+        self._resolver_takes_kind = True
 
     # -- resolver plumbing --------------------------------------------------
     def _resolve(self, name: str, what: str) -> Optional[str]:
@@ -1061,7 +1074,7 @@ class _Parser:
                 f"{what} {name}: no resolver supplied - its content is not in the model")
             return None
         try:
-            got = self.resolver(name)
+            got = self._call_resolver(name, _RESOLVE_KIND[what])
         except Exception as exc:               # a bad resolver must not crash the parse
             self.job.flags.append(f"{what} {name}: resolver raised {exc!r}")
             logger.debug("JCL resolver raised for %s %r", what, name, exc_info=True)
@@ -1070,6 +1083,19 @@ class _Parser:
             self.job.flags.append(
                 f"{what} {name}: resolver returned nothing - content not in the model")
         return got
+
+    def _call_resolver(self, name: str, kind: str) -> Optional[str]:
+        """``resolver(name, kind=...)``, or ``resolver(name)`` for one written before the
+        kind was passed. A ``TypeError`` is read as that older signature - once, and then
+        remembered, the bargain ``mainframe_artifacts.dependents`` strikes with its own
+        resolvers. So a TypeError raised from inside a newer resolver costs one retry
+        without the kind, and if that fails too it is reported like any other failure."""
+        if self._resolver_takes_kind:
+            try:
+                return self.resolver(name, kind=kind)
+            except TypeError:
+                self._resolver_takes_kind = False
+        return self.resolver(name)
 
     # -- instream data ------------------------------------------------------
     def _collect_instream(self, start: int, dlm: str,

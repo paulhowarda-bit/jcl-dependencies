@@ -8,7 +8,7 @@ looks like a finished answer about a simpler job than the one that actually runs
 
 from jcl_dependencies.parser import parse_jcl
 from jcl_dependencies.prefetch import prefetch_jcl
-from jcl_dependencies.views import build_jcl_artifacts
+from jcl_dependencies.views import build_jcl_artifacts, build_jcl_lineage
 
 from fakes.estate import PAYPROC, SORTCRD, fetch_artifact  # noqa: F401
 
@@ -67,3 +67,52 @@ def test_a_failed_request_is_an_error_row_never_an_absence():
     assert row["status"] == "error"
     assert "share unreachable" in row["error"]
     assert "NOT evidence the member is absent" in row["reason"]
+
+
+# --------------------------------------------------------------------------- #
+# batch-26 ledger item 62: a member is asked for as what the parser knows it is
+# --------------------------------------------------------------------------- #
+
+# One member name, two members: a job and a cataloged PROC that share it. A real estate
+# is full of these, and a service asked by the name alone can only pick one of them.
+SHARED_JOB = "//SHARED   JOB (A),'THE JOB'\n//JS1      EXEC PGM=JOBPGM\n"
+SHARED_PROC = ("//SHARED   PROC\n"
+               "//PS1      EXEC PGM=PROCPGM\n"
+               "//OUT      DD DSN=PROD.SHARED.OUT,DISP=SHR\n")
+
+
+def _typed_estate(asked):
+    """Answers the JOB to an untyped ask, and the PROC only to `type="proc"`."""
+    def fetch(name, type=None, copy=None):             # noqa: A002 - the wire keyword
+        asked.append((str(name), type))
+        text = SHARED_PROC if type == "proc" else SHARED_JOB
+        return {"artifact_name": str(name), "found": True, "text": text,
+                "detected_type": type or "jcl", "source_location": f"PROD.LIB({name})"}
+    return fetch
+
+
+def test_a_proc_is_asked_for_as_a_proc_not_as_whatever_shares_its_name():
+    """Asked by the name alone, the estate answers with the job - and the job's steps
+    then stand in for the PROC's, silently, because something did come back."""
+    asked = []
+    src = "//J        JOB (A),'T'\n//S1       EXEC SHARED\n"
+    pre = prefetch_jcl(src, _typed_estate(asked))
+    job = parse_jcl(src, resolver=pre.resolver())
+    assert asked == [("SHARED", "proc")]
+    assert [s["program"] for s in build_jcl_lineage(job)["steps"]] == ["PROCPGM"]
+    assert not [f for f in job.flags if "resolver returned nothing" in f], job.flags
+
+
+def test_an_include_member_and_a_control_card_are_asked_for_as_cntl():
+    asked = []
+
+    def logging_fetch(name, type=None, copy=None):     # noqa: A002
+        asked.append((str(name), type))
+        return fetch_artifact(name, type=type, copy=copy)
+
+    src = ("//J        JOB (A),'T'\n"
+           "//S1       EXEC PGM=SORT\n"
+           "//SYSIN    DD DSN=PARM.LIB(SORTCRD),DISP=SHR\n"
+           "//         INCLUDE MEMBER=FINSTD\n")
+    prefetch_jcl(src, logging_fetch)
+    assert asked == [("FINSTD", "cntl"), ("SORTCRD", "cntl")]
