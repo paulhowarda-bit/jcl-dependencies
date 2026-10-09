@@ -1576,3 +1576,35 @@ def test_the_example_publishes_every_dataset_each_concatenated_dd_reads():
     assert copy1["SYSUT1"][2:4] == (None, "PROD.SALES.DAILY.MON")     # referback: first
     assert ("MERGE", "PRINT", "PROD.SALES.WEEK") in _edges(job)
     assert len(job.flags) == 1 and "DDNAME=FEED" in job.flags[0]
+# batch-26 ledger item 62: the resolver is told what kind of member it is asked for
+# --------------------------------------------------------------------------- #
+
+KINDS_JOB = ("//J        JOB (A),'T'\n"
+             "//S1       EXEC PGM=SORT\n"
+             "//SYSIN    DD DSN=PARM.LIB(CARD1),DISP=SHR\n"
+             "//S2       EXEC PROC=PROC1\n"
+             "//         INCLUDE MEMBER=INC1\n")
+
+
+def test_the_resolver_is_told_what_kind_of_member_it_is_asked_for():
+    """In the manifest's own words: the same row's kind, and what the estate request's
+    type is derived from."""
+    asked = []
+
+    def resolver(name, kind=None):
+        asked.append((name, kind))
+        return None
+
+    parse_jcl(KINDS_JOB, resolver=resolver)
+    assert asked == [("PROC1", "proc"), ("INC1", "include-member"),
+                     ("PARM.LIB(CARD1)", "control-card")]
+
+
+def test_a_resolver_that_takes_only_the_name_still_resolves():
+    """Every resolver written before the kind was passed keeps working."""
+    def resolver(name):
+        return "//PROC1    PROC\n//PS1      EXEC PGM=PROCPGM\n" if name == "PROC1" else None
+
+    job = parse_jcl(KINDS_JOB, resolver=resolver)
+    assert "PROCPGM" in [s.pgm for s in job.steps]
+    assert not [f for f in job.flags if "resolver raised" in f], job.flags

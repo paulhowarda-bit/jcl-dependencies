@@ -21,8 +21,9 @@ closure - no error, just a job that reads as though it had fewer steps than it r
 
 from __future__ import annotations
 
-from typing import Callable, Iterable, List, Optional
+from typing import Callable, Iterable, List, Optional, Tuple
 
+from mainframe_artifacts.fetch import request_type
 from mainframe_artifacts.prefetch import (PrefetchResult, Prefetcher,  # noqa: F401
                                         member_key)
 
@@ -40,28 +41,35 @@ def prefetch_jcl(source: str, fetcher: Optional[Callable],
     """Close over the cataloged PROCs, ``INCLUDE`` members and control-card datasets a
     job needs, by replaying the parse until it stops asking for members it has not got.
 
-    No type hint is passed: the estate service auto-detects, and its ``detected_type`` is
-    a better answer than anything we could infer from the DD that referenced the member.
+    Each member is requested as what the parse asked for it as: a PROC as ``proc``, an
+    ``INCLUDE`` member or a control-card dataset as ``cntl`` - the type stage 2 uses for
+    the same manifest row (``mainframe_artifacts.fetch.request_type``). This used to send
+    no type and leave the service to auto-detect, which it can only do from the name; on
+    a real estate one member name is often a PROC, a job and a control card at once, and
+    the parser is the only party that knows which one an ``EXEC`` or a ``SYSIN DD`` meant.
+    The service's ``detected_type`` is still what the report records.
     """
     pf = Prefetcher(fetcher, paths, dest, unavailable, result, seen=seen,
                     producer=producer)
     pf.name_source(source_name)
 
     for _ in range(max_rounds):
-        asked: List[str] = []
+        asked: List[Tuple[str, Optional[str]]] = []
 
-        def recording(name: str, _asked=asked) -> Optional[str]:
-            _asked.append(name)
+        def recording(name: str, kind: Optional[str] = None,
+                      _asked=asked) -> Optional[str]:
+            _asked.append((name, kind))
             return pf.store_text(name) or pf.result.resolver()(name)
 
         parse_jcl(source, resolver=recording, source_name=source_name)
-        fresh = [n for n in asked if member_key(n) not in pf.seen]
+        fresh = [(n, k) for n, k in asked if member_key(n) not in pf.seen]
         if not fresh:
             break
         # One round IS a level: everything the parse asked for this time round was asked
         # for before any of it came back, so it can all be retrieved together.
         pf.obtain_wave(
-            [(n, "referenced by the job (PROC / INCLUDE / control card)") for n in fresh],
+            [(n, "referenced by the job (PROC / INCLUDE / control card)",
+              request_type(k) if k else None) for n, k in fresh],
             None, jobs)
     else:
         pf.note_closure_bound(max_rounds)

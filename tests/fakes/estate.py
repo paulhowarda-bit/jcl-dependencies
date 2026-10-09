@@ -61,5 +61,8 @@ def fetch_artifact(name, type=None, copy=None):        # noqa: A002 - the wire k
     if text is None:
         return {"artifact_name": key, "found": False}
     return {"artifact_name": key, "found": True, "text": text,
-            "detected_type": "proc" if key.endswith("PROC") else "control-card",
+            # In the protocol's words, the ones the closure asks with. Answering
+            # `control-card` to a request for `cntl` would put a typeNote disagreement
+            # in every report - a quirk of this stand-in, not a finding about an estate.
+            "detected_type": "proc" if key.endswith("PROC") else "cntl",
             "source_location": f"PROD.PROCLIB({key})"}

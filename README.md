@@ -91,6 +91,16 @@ those steps do not show up as programs, as datasets, or at all — and the job r
 simpler than it is. So stage 1 retrieves them before the parse, by replaying the parse
 until it stops asking for members it has not got.
 
+**Each member is asked for as what it is.** One member name is often a PROC, a job and a
+control card at once, and a service asked by the name alone can only guess - so a PROC
+whose name a job shares came back as the job, and its steps stood in for the PROC's
+without a word. The parser knows which one an `EXEC` or a `SYSIN DD` meant, so the
+resolver is called `resolver(name, kind=...)` with the manifest's word for it (`proc`,
+`include-member`, `control-card`), and stage 1 requests it under the type stage 2 uses
+for that kind (`proc`, `cntl`). A resolver written as `resolver(name)` is called that way.
+An estate bundle gathered before this asked for these members with no type, so it has no
+record of them asked as one, and says so on replay: gather it again.
+
 Nothing here follows job-to-job scheduling references (INTRDR, TWS, CA-7). That is a
 different graph, and this package does not pretend to model it.
 
