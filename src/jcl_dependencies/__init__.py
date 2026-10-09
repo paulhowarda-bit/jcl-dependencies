@@ -42,7 +42,11 @@ PRODUCER = "jcl-dependencies"
 #: ``formatVersion: 2`` on its own since conditions moved into interned pools, so 1 would
 #: have taken a published number BACKWARDS - the exact silent shape change this key exists
 #: to prevent. One number across the family keeps a consumer's rule the same everywhere.
-VIEW_SCHEMA_VERSION = 3
+#:
+#: 4: every dataset of a concatenated DD is published, each with its ``concatIndex``. A
+#: ``ddBindings`` row is keyed on (step, ddname, concatIndex) - (step, ddname) alone no
+#: longer names one row - and a step's inputs list a concatenated DD once per dataset.
+VIEW_SCHEMA_VERSION = 4
 
 from .parser import DD, DDSegment, Job, ProcDef, Step, parse_jcl   # noqa: E402
 from .prefetch import prefetch_jcl                                 # noqa: E402

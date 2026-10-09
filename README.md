@@ -114,6 +114,35 @@ see two steps sharing it. Inside a PROC a sibling step is named as the PROC name
 referback naming no earlier DD with a dataset name is left as written and flagged. See
 `examples/refback.jcl`.
 
+**Every dataset of a concatenated DD is published.** A named DD followed by unnamed ones
+is one ddname reading several datasets in turn, and each is a row — in `ddBindings`, in
+`datasets`, in the step's inputs and in the artifact manifest — carrying **`concatIndex`**,
+its 1-based position among the DD's statements. So a `ddBindings` row is keyed on
+`(step, ddname, concatIndex)`; `(step, ddname)` alone no longer names one row
+(`formatVersion` 4). A DD of one statement carries no `concatIndex` and reads exactly as
+before. The rules, each the system's own:
+
+- A dataset at position 2 or later is always **read**, whatever its `DISP` — `OLD` or
+  `MOD` there says how it is allocated, not that the step writes it.
+- A statement that names no dataset (`DD *`, `DUMMY`) has no `ddBindings` row,
+  concatenated or not; the datasets around it keep the position they really hold, and the
+  step's inputs list it by `kind`. A temporary (`&&`) dataset is a dataset, marked
+  `temporary` as ever. A `DUMMY` anywhere but last is flagged: the system ignores what is
+  concatenated after it.
+- A backward reference to a concatenated DD is its **first** dataset only.
+- A PROC override of a concatenated DD overrides the first dataset and keeps the rest;
+  unnamed DDs after it address the following positions in order, one with nothing coded
+  leaving its position as the PROC had it.
+- `DDNAME=name` takes the definition a later DD of the step supplies. Where that DD is a
+  concatenation the reference takes its first dataset, and the rest are concatenated to
+  the last DD statement before it — the referencing DD only when nothing is coded
+  between the two. Anywhere else that is flagged, as is a reference no later DD answers.
+- A concatenated control-card DD (`SYSIN`, `SYSTSIN`, …) is read as one stream, every
+  member in order.
+
+`bind_cobol_artifacts` gives a file whose ddname is concatenated **`datasets`**, the list
+in read order, in place of `dataset`. See `examples/concat.jcl`.
+
 ## The one place it meets the COBOL tool
 
 `bind_cobol_artifacts(manifest, jobs)` joins a COBOL program's file ddnames to the

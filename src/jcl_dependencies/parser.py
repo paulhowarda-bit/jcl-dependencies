@@ -24,10 +24,10 @@ unresolved ``CALL`` or a missing copybook.
 **Honest limits, all surfaced in flags rather than guessed** (the hazards are enumerated in
 docs/mainframe-artifacts.md; this parser handles the common cases and flags the rest):
 symbolic parameters it cannot resolve are left visible and flagged; ``OLD``/``I-O`` DISP is
-direction-ambiguous and noted; dynamic allocation (SVC 99, ``BPXWDYN``), scheduler-set
-symbolics, and ``DDNAME=`` referbacks are not statically knowable and are flagged; GDG
-relative generations are normalized to their base (the stable identity) with the generation
-recorded.
+direction-ambiguous and noted; dynamic allocation (SVC 99, ``BPXWDYN``) and scheduler-set
+symbolics are not statically knowable and are flagged; a ``DDNAME=`` reference is followed
+to the later DD that defines it, and flagged where none does; GDG relative generations are
+normalized to their base (the stable identity) with the generation recorded.
 """
 
 from __future__ import annotations
@@ -54,9 +54,11 @@ class DDSegment:
     disp: List[str] = field(default_factory=list)   # [status, normal, abnormal]
     sysout: Optional[str] = None
     instream: bool = False               # DD * / DD DATA
+    lines: List[str] = field(default_factory=list)  # ... and the data that follows it
     dummy: bool = False
     member: Optional[str] = None         # DSN(MEMBER)
     gdg: Optional[str] = None            # (+1) / (0) / (-1) relative generation
+    ddname_ref: Optional[str] = None     # DDNAME=name: defined by a later DD of the step
     unresolved_symbols: List[str] = field(default_factory=list)
     raw: str = ""
 
@@ -64,9 +66,13 @@ class DDSegment:
 class DD:
     ddname: str
     segments: List[DDSegment] = field(default_factory=list)
-    instream_lines: List[str] = field(default_factory=list)  # captured control cards
     control: Optional[dict] = None       # parsed control-card summary, if any
     override: bool = False               # a PROC-step DD override (//STEP.DD ...)
+
+    @property
+    def instream_lines(self) -> List[str]:
+        """The DD's instream data, across its concatenation, in the order coded."""
+        return [ln for seg in self.segments for ln in seg.lines]
 
 
 @dataclass
@@ -418,6 +424,8 @@ def _parse_dd_segment(operands: str, symbols: Dict[str, str]) -> DDSegment:
         seg.dsn = dsn.upper()
     if "DISP" in kw:
         seg.disp = [d.upper() for d in _paren_list(kw["DISP"])]
+    if "DDNAME" in kw:
+        seg.ddname_ref = kw["DDNAME"].upper()
     return seg
 
 
@@ -437,9 +445,11 @@ def _merge_dd_segment(base: DDSegment, ov: DDSegment) -> DDSegment:
         disp=ov.disp if ov.disp else base.disp,
         sysout=ov.sysout if ov.sysout is not None else base.sysout,
         instream=base.instream,
+        lines=base.lines,
         dummy=base.dummy,
         member=ov.member if ov.member is not None else base.member,
         gdg=ov.gdg if ov.gdg is not None else base.gdg,
+        ddname_ref=ov.ddname_ref if ov.ddname_ref is not None else base.ddname_ref,
         unresolved_symbols=ov.unresolved_symbols or base.unresolved_symbols,
         raw=f"{base.raw} | override: {ov.raw}",
     )
@@ -477,8 +487,72 @@ def _resolve_referbacks(steps: List[Step]) -> List[Tuple[Step, DD, DDSegment]]:
     return unresolved
 
 
+def _resolve_ddnames(steps: List[Step]) -> List[str]:
+    """Give each ``DDNAME=name`` DD the definition a LATER DD statement of its step
+    supplies under that name, and return what a reader has to be told about it.
+
+    ``//SYSUT1 DD DDNAME=INPUT`` postpones SYSUT1's definition to ``//INPUT DD ...``;
+    INPUT is then not a ddname the step allocates. Where INPUT is a concatenation the
+    system takes only its FIRST dataset for the reference and concatenates the rest to
+    the last DD statement before INPUT - which is the referencing DD only when nothing
+    was coded between the two (z/OS MVS JCL Reference, "References to concatenated data
+    sets"). That is what the system does, so it is what is modelled, and it is flagged
+    where the rest lands on some other DD. A reference no later DD answers is flagged
+    too: what that DD reads is not in this JCL."""
+    flags: List[str] = []
+    for step in steps:
+        i = 0
+        while i < len(step.dds):
+            dd = step.dds[i]
+            for pos, seg in enumerate(dd.segments):
+                ref = seg.ddname_ref
+                if not ref or seg.dsn:
+                    continue
+                j = next((k for k in range(i + 1, len(step.dds))
+                          if step.dds[k].ddname == ref), None)
+                if j is None:
+                    flags.append(
+                        f"step {step.name}: DD {dd.ddname} is DDNAME={ref}, and no later "
+                        f"DD statement of the step is named {ref} - what it reads is not "
+                        f"in this JCL")
+                    continue
+                target = step.dds.pop(j)
+                before = step.dds[j - 1]
+                dd.segments[pos] = target.segments[0]
+                rest = target.segments[1:]
+                before.segments.extend(rest)
+                if rest and before is not dd:
+                    flags.append(
+                        f"step {step.name}: DD {dd.ddname} is DDNAME={ref} and {ref} is a "
+                        f"concatenation - {dd.ddname} takes the first dataset only, and "
+                        f"the rest ({len(rest)}) are concatenated to DD {before.ddname}, "
+                        f"the last DD statement before {ref} (how the system binds a "
+                        f"forward reference to a concatenation)")
+            i += 1
+    return flags
+
+
+def _dummies_in_concatenation(steps: List[Step]) -> List[str]:
+    """A DUMMY anywhere but last in a concatenation ends the data there: reading a dummy
+    data set takes the end-of-data exit at once, and the system ignores whatever is
+    concatenated after it. Those later datasets are still allocated, so they stay
+    published as coded - with this said about them."""
+    flags: List[str] = []
+    for step in steps:
+        for dd in step.dds:
+            at = next((n for n, seg in enumerate(dd.segments[:-1], start=1) if seg.dummy),
+                      None)
+            if at:
+                flags.append(
+                    f"step {step.name}: DD {dd.ddname} has DUMMY at position {at} of a "
+                    f"concatenation of {len(dd.segments)} - the system ignores the data "
+                    f"sets concatenated after a dummy one, so the later positions are "
+                    f"allocated but never read; they are published as coded")
+    return flags
+
+
 def _dd_direction(seg: DDSegment) -> Optional[str]:
-    """'input' / 'output' / 'inout' / None for a single segment, from DISP / SYSOUT /
+    """'input' / 'output' / None for a single segment, from DISP / SYSOUT /
     instream. DISP status is the primary signal; OLD/I-O are ambiguous and noted by the
     caller via a flag."""
     if seg.dummy:
@@ -968,6 +1042,12 @@ class _Parser:
         # to the first step anywhere in the job with a matching proc-step name, which
         # sent the override to the wrong copy when a PROC was invoked more than once.
         self._invocation: List[Step] = []
+        # The DD the last NAMED DD statement addressed, the position the next unnamed DD
+        # statement takes in it, the step that holds it, and whether a PROC override
+        # addressed it. An unnamed DD continues THAT DD - not whichever DD is last in the
+        # last step, which is a different one whenever the named statement was an
+        # override. None straight after an EXEC.
+        self._concat: Optional[Tuple[DD, int, Step, bool]] = None
 
     # -- resolver plumbing --------------------------------------------------
     def _resolve(self, name: str, what: str) -> Optional[str]:
@@ -1028,6 +1108,11 @@ class _Parser:
                 f"overrides are applied")
             for pname in list(self.job.procs):
                 self.job.steps.extend(self._expand_proc(pname, pname, {}, None))
+        # Before the referbacks: a DD defined through DDNAME= is one they may point at.
+        for msg in (_resolve_ddnames(self.job.steps)
+                    + _dummies_in_concatenation(self.job.steps)):
+            if msg not in self.job.flags:
+                self.job.flags.append(msg)
         # Before the control cards: a card DD may itself be a referback.
         for step, dd, seg in _resolve_referbacks(self.job.steps):
             msg = (f"step {step.name}: DD {dd.ddname} refers back to {seg.dsn}, which "
@@ -1054,14 +1139,18 @@ class _Parser:
                 # carry syntax.
                 if dd.ddname not in card_dds:
                     continue
-                lines = list(dd.instream_lines)
-                if not lines and dd.segments:
-                    seg = dd.segments[0]
-                    if seg.dsn and not seg.sysout and not seg.instream:
+                # A card DD may concatenate instream cards and card members; the
+                # utility reads them as ONE stream, in the order coded. Reading only the
+                # first member lost every card after it - a DSN RUN PROGRAM among them.
+                lines: List[str] = []
+                for seg in dd.segments:
+                    if seg.instream:
+                        lines.extend(seg.lines)
+                    elif seg.dsn and not seg.sysout:
                         name = seg.dsn + (f"({seg.member})" if seg.member else "")
                         got = self._resolve(name, "control-card dataset")
                         if got is not None:
-                            lines = got.splitlines()
+                            lines.extend(got.splitlines())
                 if lines:
                     ctl = _parse_control_cards(step.pgm, lines, dd.ddname)
                     if ctl:
@@ -1113,16 +1202,15 @@ class _Parser:
 
     def _build(self, items: List[dict]) -> None:
         cur_step: Optional[Step] = None
-        cur_dd: Optional[DD] = None
+        cur_seg: Optional[DDSegment] = None
         collecting_proc: Optional[ProcDef] = None
 
         idx = 0
         while idx < len(items):
             item = items[idx]
             if item["kind"] == "data":
-                if cur_dd is not None:
-                    cur_dd.instream_lines.extend(
-                        l.rstrip("\n") for l in item["lines"])
+                if cur_seg is not None:
+                    cur_seg.lines.extend(l.rstrip("\n") for l in item["lines"])
                 idx += 1
                 continue
             log: _LogLine = item["line"]
@@ -1188,18 +1276,17 @@ class _Parser:
                 idx += 1
                 continue
             if op == "EXEC":
-                cur_step, cur_dd = None, None
+                cur_step, cur_seg = None, None
+                self._concat = None
                 new_steps = self._make_steps(log)
                 self._attach_step_context(new_steps)
                 self.job.steps.extend(new_steps)
                 self._invocation = new_steps    # overrides bind to THIS invocation
                 cur_step = new_steps[-1] if new_steps else None
-                cur_dd = None
                 idx += 1
                 continue
             if op == "DD":
-                self._handle_dd(log, cur_step)
-                cur_dd = self._last_dd(cur_step, log)
+                cur_seg = self._handle_dd(log, cur_step)
                 idx += 1
                 continue
             idx += 1
@@ -1237,11 +1324,6 @@ class _Parser:
                 st.cond_parsed = _parse_cond(st.cond)
 
     # -- helpers ------------------------------------------------------------
-    def _last_dd(self, step: Optional[Step], log: _LogLine) -> Optional[DD]:
-        if step is None or not step.dds:
-            return None
-        return step.dds[-1]
-
     def _make_steps(self, log: _LogLine) -> List[Step]:
         kw, pos = _operand_map(log.operands)
         if "PGM" in kw:
@@ -1360,6 +1442,7 @@ class _Parser:
             elif op == "ENDIF":
                 self._if_pop()
             elif op == "EXEC":
+                self._concat = None
                 steps = self._make_steps(log)
                 self._attach_step_context(steps)
                 self.job.steps.extend(steps)
@@ -1368,27 +1451,49 @@ class _Parser:
             elif op == "DD":
                 self._handle_dd(log, step)
 
-    def _handle_dd(self, log: _LogLine, cur_step: Optional[Step]) -> None:
+    def _handle_dd(self, log: _LogLine, cur_step: Optional[Step]) -> Optional[DDSegment]:
+        """Apply one DD statement. Returns the segment it produced - the one any instream
+        data that follows belongs to - or None for a DD with no step to belong to."""
         if cur_step is None:
-            return
+            return None
         ddname = log.name
-        # concatenation: a DD with a BLANK name adds a segment to the previous DD.
-        if ddname == "" and cur_step.dds:
-            seg = _parse_dd_segment(log.operands, self.job.symbols)
-            cur_step.dds[-1].segments.append(seg)
-            self._note_symbols(seg, cur_step)
-            return
+        # concatenation: a DD with a BLANK name is the next dataset of the DD the last
+        # named DD statement addressed.
+        if ddname == "":
+            if self._concat is None and cur_step.dds:
+                last = cur_step.dds[-1]
+                self._concat = (last, len(last.segments), cur_step, False)
+            if self._concat is not None:
+                return self._concatenate(log)
         # a PROC-step override: //procstep.ddname DD ...
         if "." in ddname:
-            self._apply_override(ddname, log)
-            return
+            return self._apply_override(ddname, log)
         dd = DD(ddname=ddname)
         seg = _parse_dd_segment(log.operands, self.job.symbols)
         dd.segments.append(seg)
         self._note_symbols(seg, cur_step)
         cur_step.dds.append(dd)
+        self._concat = (dd, 1, cur_step, False)
+        return seg
 
-    def _apply_override(self, dotted: str, log: _LogLine) -> None:
+    def _concatenate(self, log: _LogLine) -> DDSegment:
+        """An unnamed DD statement. After a PROC override it overrides, in order, the
+        dataset at the same position of the PROC's concatenation - a blank operand field
+        leaves that one as the PROC coded it - and past the end of the PROC's
+        concatenation it adds to it. Anywhere else it is simply the next dataset."""
+        dd, pos, step, overriding = self._concat
+        seg = _parse_dd_segment(log.operands, self.job.symbols)
+        self._note_symbols(seg, step)
+        if overriding and pos < len(dd.segments):
+            if log.operands.strip():
+                dd.segments[pos] = _merge_dd_segment(dd.segments[pos], seg)
+            seg = dd.segments[pos]
+        else:
+            dd.segments.append(seg)
+        self._concat = (dd, pos + 1, step, overriding)
+        return seg
+
+    def _apply_override(self, dotted: str, log: _LogLine) -> DDSegment:
         procstep, ddname = dotted.split(".", 1)
         seg = _parse_dd_segment(log.operands, self.job.symbols)
         # Bind to the invocation this override follows, not to the first step in the whole
@@ -1400,7 +1505,11 @@ class _Parser:
         if target is None:
             self.job.flags.append(
                 f"DD override {dotted}: no PROC step {procstep} to apply it to")
-            return
+            # Nor is there one for the unnamed DD statements that continue it: they go
+            # with it, to a DD no step holds, rather than onto whichever DD came before.
+            self._concat = (DD(ddname=ddname, segments=[seg]), 1, Step(name=procstep),
+                            False)
+            return seg
         for dd in target.dds:
             if dd.ddname == ddname:
                 # An override MERGES: the parameters it names replace the PROC DD's, and
@@ -1408,13 +1517,22 @@ class _Parser:
                 # the PROC DD's DISP whenever the override only changed the DSN, and DISP
                 # is what the lineage reads for input-vs-output - so the direction went
                 # null and the dataflow edge vanished.
-                dd.segments = [_merge_dd_segment(dd.segments[0], seg)] if dd.segments \
-                    else [seg]
+                #
+                # And it overrides the FIRST dataset only. Where the PROC DD is a
+                # concatenation the rest stay as the PROC coded them, unless unnamed DD
+                # statements follow the override to address them in turn.
+                if dd.segments:
+                    dd.segments[0] = _merge_dd_segment(dd.segments[0], seg)
+                else:
+                    dd.segments.append(seg)
                 dd.override = True
-                return
+                self._concat = (dd, 1, target, True)
+                return dd.segments[0]
         newdd = DD(ddname=ddname, override=True)
         newdd.segments.append(seg)
         target.dds.append(newdd)           # additive override
+        self._concat = (newdd, 1, target, False)
+        return seg
 
     def _note_symbols(self, seg: DDSegment, step: Step) -> None:
         for s in seg.unresolved_symbols:

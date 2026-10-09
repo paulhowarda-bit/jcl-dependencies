@@ -1137,3 +1137,314 @@ def test_the_example_resolves_its_quoted_symbols_and_its_referbacks():
     assert {("NIGHTLY.SORT", "NIGHTLY.REPORT", "PROD.SALES.SORTED"),
             ("NIGHTLY.SORT", "ARCHIVE", "PROD.SALES.SORTED")} <= _edges(job)
     assert job.flags == []
+
+
+# --------------------------------------------------------------------------- #
+# concatenation: every dataset of a concatenated DD is published
+# --------------------------------------------------------------------------- #
+
+_CONCAT = ("//CONCAT JOB (ACCT),CLASS=A\n"
+           "//STEP010 EXEC PGM=SORT\n"
+           "//SORTIN  DD DSN=A.B.IN1,DISP=SHR\n"
+           "//        DD DSN=A.B.IN2,DISP=SHR\n"
+           "//        DD DSN=A.B.IN3,DISP=SHR\n"
+           "//SORTOUT DD DSN=A.B.OUT,DISP=(NEW,CATLG)\n")
+
+_CONCAT_PROC = ("//SORTPRC PROC\n"
+                "//PS1     EXEC PGM=SORT\n"
+                "//SORTIN  DD DSN=P.IN1,DISP=SHR\n"
+                "//        DD DSN=P.IN2,DISP=SHR\n"
+                "//        DD DSN=P.IN3,DISP=SHR\n"
+                "//SORTOUT DD DSN=P.OUT,DISP=(NEW,CATLG)\n"
+                "//        PEND\n")
+
+
+def _rows(text: str, resolver=None):
+    """(job, lineage, [(step, ddname, concatIndex, dataset, io)] in published order)."""
+    job = parse_jcl(text, resolver=resolver)
+    lin = build_jcl_lineage(job)
+    return job, lin, [(b["step"], b["ddname"], b.get("concatIndex"), b["dataset"], b["io"])
+                      for b in lin["ddBindings"]]
+
+
+def test_every_dataset_of_a_concatenated_dd_is_bound_in_order():
+    """Only the first was published: the step read as though it read one file, and the
+    other datasets were in no view at all."""
+    job, lin, rows = _rows(_CONCAT)
+    assert rows == [("STEP010", "SORTIN", 1, "A.B.IN1", "input"),
+                    ("STEP010", "SORTIN", 2, "A.B.IN2", "input"),
+                    ("STEP010", "SORTIN", 3, "A.B.IN3", "input"),
+                    ("STEP010", "SORTOUT", None, "A.B.OUT", "output")]
+    assert [d["dsn"] for d in lin["datasets"]] == ["A.B.IN1", "A.B.IN2", "A.B.IN3",
+                                                   "A.B.OUT"]
+    third = next(d for d in lin["datasets"] if d["dsn"] == "A.B.IN3")
+    assert third["consumedBy"] == [{"step": "STEP010", "ddname": "SORTIN",
+                                    "concatIndex": 3, "disp": "SHR"}]
+    assert [(d["ddname"], d["concatIndex"], d["dataset"])
+            for d in lin["steps"][0]["inputs"]] == [("SORTIN", 1, "A.B.IN1"),
+                                                    ("SORTIN", 2, "A.B.IN2"),
+                                                    ("SORTIN", 3, "A.B.IN3")]
+    arts = _art_by_name(job)
+    assert [arts[n]["io"] for n in ("A.B.IN1", "A.B.IN2", "A.B.IN3")] == ["read"] * 3
+    assert arts["A.B.IN2"]["touchedBy"] == [{"step": "STEP010", "ddname": "SORTIN",
+                                             "concatIndex": 2, "disp": "SHR"}]
+    assert job.flags == []
+
+
+def test_a_dd_of_one_statement_carries_no_concat_index():
+    """The position is said only where there is one to say, so a job with no
+    concatenation publishes what it always did."""
+    job, lin, _ = _rows(_CONCAT)
+    assert "concatIndex" not in next(b for b in lin["ddBindings"]
+                                     if b["ddname"] == "SORTOUT")
+    assert "concatIndex" not in lin["steps"][0]["outputs"][0]
+    out = next(d for d in lin["datasets"] if d["dsn"] == "A.B.OUT")
+    assert out["producedBy"] == [{"step": "STEP010", "ddname": "SORTOUT", "disp": "NEW"}]
+    assert _art_by_name(job)["A.B.OUT"]["touchedBy"] == [
+        {"step": "STEP010", "ddname": "SORTOUT", "disp": "NEW"}]
+
+
+def test_a_concatenation_inside_a_proc_is_published_the_same():
+    want = [("STEP1.PS1", "SORTIN", 1, "P.IN1", "input"),
+            ("STEP1.PS1", "SORTIN", 2, "P.IN2", "input"),
+            ("STEP1.PS1", "SORTIN", 3, "P.IN3", "input"),
+            ("STEP1.PS1", "SORTOUT", None, "P.OUT", "output")]
+    assert _rows("//J JOB\n" + _CONCAT_PROC + "//STEP1 EXEC SORTPRC\n")[2] == want
+    cataloged = {"SORTPRC": _CONCAT_PROC}
+    assert _rows("//J JOB\n//STEP1 EXEC SORTPRC\n",
+                 resolver=lambda n: cataloged.get(n.upper()))[2] == want
+
+
+def test_a_named_dd_after_a_concatenation_starts_a_new_ddname():
+    _, _, rows = _rows("//J JOB\n//S EXEC PGM=P\n"
+                       "//IN  DD DSN=A.IN1,DISP=SHR\n"
+                       "//    DD DSN=A.IN2,DISP=SHR\n"
+                       "//IN2 DD DSN=A.IN3,DISP=SHR\n")
+    assert rows == [("S", "IN", 1, "A.IN1", "input"), ("S", "IN", 2, "A.IN2", "input"),
+                    ("S", "IN2", None, "A.IN3", "input")]
+
+
+def test_a_comment_between_concatenated_statements_does_not_end_it():
+    _, _, rows = _rows("//J JOB\n//S EXEC PGM=P\n"
+                       "//IN  DD DSN=A.IN1,DISP=SHR\n"
+                       "//* the second day\n"
+                       "//    DD DSN=A.IN2,DISP=SHR\n")
+    assert rows == [("S", "IN", 1, "A.IN1", "input"), ("S", "IN", 2, "A.IN2", "input")]
+
+
+def test_a_comma_continued_dd_is_one_statement_not_a_concatenation():
+    _, _, rows = _rows("//J JOB\n//S EXEC PGM=P\n"
+                       "//OUT DD DSN=A.OUT,\n"
+                       "//       DISP=(NEW,CATLG),\n"
+                       "//       UNIT=SYSDA\n")
+    assert rows == [("S", "OUT", None, "A.OUT", "output")]
+
+
+def test_a_proc_override_replaces_the_first_dataset_and_keeps_the_rest():
+    """One overriding DD statement overrides the first DD of the PROC's concatenation.
+    It used to replace the whole DD, which dropped every dataset after the first."""
+    _, _, rows = _rows("//J JOB\n" + _CONCAT_PROC + "//STEP1 EXEC SORTPRC\n"
+                       "//PS1.SORTIN DD DSN=O.IN1\n")
+    assert rows[:3] == [("STEP1.PS1", "SORTIN", 1, "O.IN1", "input"),
+                        ("STEP1.PS1", "SORTIN", 2, "P.IN2", "input"),
+                        ("STEP1.PS1", "SORTIN", 3, "P.IN3", "input")]
+
+
+def test_unnamed_dds_after_an_override_address_the_proc_concatenation_in_order():
+    """A DD with nothing on it leaves that position as the PROC coded it; the next one
+    overrides the second. They used to be concatenated to the last DD of the step -
+    here SORTOUT, a different ddname altogether."""
+    _, _, rows = _rows("//J JOB\n" + _CONCAT_PROC + "//STEP1 EXEC SORTPRC\n"
+                       "//PS1.SORTIN DD\n"
+                       "//           DD DSN=O.IN2\n")
+    assert rows == [("STEP1.PS1", "SORTIN", 1, "P.IN1", "input"),
+                    ("STEP1.PS1", "SORTIN", 2, "O.IN2", "input"),
+                    ("STEP1.PS1", "SORTIN", 3, "P.IN3", "input"),
+                    ("STEP1.PS1", "SORTOUT", None, "P.OUT", "output")]
+
+
+def test_unnamed_dds_past_the_end_of_the_proc_concatenation_add_to_it():
+    _, _, rows = _rows("//J JOB\n" + _CONCAT_PROC + "//STEP1 EXEC SORTPRC\n"
+                       "//PS1.SORTIN DD\n//  DD\n//  DD\n"
+                       "//           DD DSN=O.IN4,DISP=SHR\n")
+    assert [r[2:4] for r in rows if r[1] == "SORTIN"] == [
+        (1, "P.IN1"), (2, "P.IN2"), (3, "P.IN3"), (4, "O.IN4")]
+
+
+def test_an_override_naming_no_proc_step_takes_its_continuation_with_it():
+    """The override is flagged as not applied. What is concatenated to it is not applied
+    either - not handed to whichever DD happened to come last."""
+    job, _, rows = _rows("//J JOB\n" + _CONCAT_PROC + "//STEP1 EXEC SORTPRC\n"
+                         "//NOSTEP.SORTIN DD DSN=O.IN1,DISP=SHR\n"
+                         "//              DD DSN=O.IN2,DISP=SHR\n")
+    assert [r[3] for r in rows] == ["P.IN1", "P.IN2", "P.IN3", "P.OUT"]
+    assert any("NOSTEP.SORTIN" in f for f in job.flags)
+
+
+def test_instream_data_after_an_override_belongs_to_the_overridden_dd():
+    proc = ("//TWO PROC\n//PS1 EXEC PGM=SORT\n//SYSIN DD DUMMY\n"
+            "//PS2 EXEC PGM=IEFBR14\n//LAST DD DSN=P.LAST,DISP=SHR\n// PEND\n")
+    job = parse_jcl("//J JOB\n" + proc + "//STEP1 EXEC TWO\n"
+                    "//PS1.SYSIN DD *\n  SORT FIELDS=COPY\n/*\n")
+    by = {(s.name, d.ddname): d for s in job.steps for d in s.dds}
+    assert by[("STEP1.PS1", "SYSIN")].instream_lines == ["  SORT FIELDS=COPY"]
+    assert by[("STEP1.PS2", "LAST")].instream_lines == []
+
+
+def test_a_ddname_reference_takes_the_definition_a_later_dd_supplies():
+    """``DDNAME=CARDS`` postpones SYSUT1 to the DD named CARDS; CARDS is not a ddname the
+    step allocates."""
+    job, _, rows = _rows("//J JOB\n//S EXEC PGM=IEBGENER\n"
+                         "//SYSUT1 DD DDNAME=CARDS\n"
+                         "//SYSUT2 DD DSN=A.OUT,DISP=(NEW,CATLG)\n"
+                         "//CARDS  DD DSN=A.IN,DISP=SHR\n")
+    assert rows == [("S", "SYSUT1", None, "A.IN", "input"),
+                    ("S", "SYSUT2", None, "A.OUT", "output")]
+    assert job.flags == []
+
+
+def test_a_ddname_reference_to_a_concatenation_right_after_it_takes_all_of_it():
+    job, _, rows = _rows("//J JOB\n//S EXEC PGM=IEBGENER\n"
+                         "//SYSUT2 DD SYSOUT=*\n"
+                         "//SYSUT1 DD DDNAME=INPUT\n"
+                         "//INPUT  DD DSN=A.IN1,DISP=SHR\n"
+                         "//       DD DSN=A.IN2,DISP=SHR\n")
+    assert rows == [("S", "SYSUT1", 1, "A.IN1", "input"),
+                    ("S", "SYSUT1", 2, "A.IN2", "input")]
+    assert job.flags == []
+
+
+def test_a_ddname_reference_to_a_concatenation_binds_as_the_system_does():
+    """With DD statements between the reference and the concatenation, the reference
+    takes the FIRST dataset and the rest are concatenated to the last DD statement
+    before the concatenation - not to the referencing DD. Surprising, and so flagged."""
+    job, _, rows = _rows("//J JOB\n//S EXEC PGM=IEBGENER\n"
+                         "//SYSUT1 DD DDNAME=INPUT\n"
+                         "//OTHER  DD DSN=A.OTHER,DISP=SHR\n"
+                         "//INPUT  DD DSN=A.IN1,DISP=SHR\n"
+                         "//       DD DSN=A.IN2,DISP=SHR\n")
+    assert rows == [("S", "SYSUT1", None, "A.IN1", "input"),
+                    ("S", "OTHER", 1, "A.OTHER", "input"),
+                    ("S", "OTHER", 2, "A.IN2", "input")]
+    assert any("DDNAME=INPUT" in f and "DD OTHER" in f for f in job.flags)
+
+
+def test_a_ddname_reference_no_later_dd_answers_is_flagged():
+    job, _, rows = _rows("//J JOB\n//S EXEC PGM=IEBGENER\n"
+                         "//INPUT  DD DSN=A.EARLIER,DISP=SHR\n"
+                         "//SYSUT1 DD DDNAME=INPUT\n")
+    assert rows == [("S", "INPUT", None, "A.EARLIER", "input")]   # earlier: not it
+    assert any("SYSUT1" in f and "DDNAME=INPUT" in f for f in job.flags)
+
+
+def test_a_referback_to_a_concatenation_is_its_first_dataset_only():
+    _, _, rows = _rows("//J JOB\n//S1 EXEC PGM=P\n"
+                       "//IN DD DSN=A.IN1,DISP=SHR\n"
+                       "//   DD DSN=A.IN2,DISP=SHR\n"
+                       "//S2 EXEC PGM=Q\n"
+                       "//X  DD DSN=*.S1.IN,DISP=SHR\n")
+    assert rows[2] == ("S2", "X", None, "A.IN1", "input")
+
+
+def test_disp_on_a_later_statement_does_not_publish_a_write():
+    """A concatenation is read through. OLD or MOD on position 2 or later says how that
+    dataset is allocated - and it used to make the FIRST dataset read as written too."""
+    job, lin, rows = _rows("//J JOB\n//S EXEC PGM=P\n"
+                           "//IN DD DSN=A.IN1,DISP=SHR\n"
+                           "//   DD DSN=A.IN2,DISP=OLD\n"
+                           "//   DD DSN=A.IN3,DISP=(MOD,KEEP)\n")
+    assert [r[4] for r in rows] == ["input", "input", "input"]
+    assert all(d["producedBy"] == [] for d in lin["datasets"])
+    arts = _art_by_name(job)
+    assert [arts[n]["io"] for n in ("A.IN1", "A.IN2", "A.IN3")] == ["read"] * 3
+    assert not any("directionAmbiguous" in a for a in arts.values())
+
+
+def test_statements_naming_no_dataset_have_no_row_but_keep_their_position():
+    """``DD *`` and DUMMY bind no dataset, concatenated or not, so they have no binding
+    row; the datasets around them keep the position they really hold, and the step's
+    inputs list all five statements by kind. A temporary dataset is a dataset."""
+    job, lin, rows = _rows("//J JOB\n//S EXEC PGM=P\n"
+                           "//IN DD DSN=A.IN1,DISP=SHR\n"
+                           "//   DD *\nDATA\n/*\n"
+                           "//   DD DUMMY\n"
+                           "//   DD DSN=&&TEMP,DISP=(OLD,DELETE)\n"
+                           "//   DD DSN=A.IN5,DISP=SHR\n")
+    assert [r[2:4] for r in rows] == [(1, "A.IN1"), (4, "&&TEMP"), (5, "A.IN5")]
+    assert [(d["concatIndex"], d["kind"]) for d in lin["steps"][0]["inputs"]] == [
+        (1, "dataset"), (2, "instream"), (3, "dummy"), (4, "dataset"), (5, "dataset")]
+    assert next(d for d in lin["datasets"] if d["dsn"] == "&&TEMP")["temporary"] is True
+    assert any("DUMMY at position 3 of a concatenation of 5" in f for f in job.flags)
+
+
+def test_a_concatenated_card_dd_is_read_as_one_stream():
+    """Only the first member's cards were read, so a RUN PROGRAM in a later one - and the
+    program it names - was not in the model."""
+    lib = {"PARM.LIB(DSNCMD)": " DSN SYSTEM(DB2P)",
+           "PARM.LIB(RUNPAY)": " RUN PROGRAM(PAYCALC) PLAN(PAYPLAN)\n END"}
+    job = parse_jcl("//J JOB\n//S EXEC PGM=IKJEFT01\n"
+                    "//SYSTSIN DD DSN=PARM.LIB(DSNCMD),DISP=SHR\n"
+                    "//        DD DSN=PARM.LIB(RUNPAY),DISP=SHR\n",
+                    resolver=lib.get)
+    arts = _art_by_name(job)
+    assert arts["PAYCALC"]["runVia"] == "TSO/DSN"
+    assert arts["PARM.LIB(DSNCMD)"]["touchedBy"] == [
+        {"step": "S", "ddname": "SYSTSIN", "concatIndex": 1}]
+    assert arts["PARM.LIB(RUNPAY)"]["touchedBy"] == [
+        {"step": "S", "ddname": "SYSTSIN", "concatIndex": 2}]
+    assert job.flags == []
+
+
+def test_a_concatenated_sort_input_names_every_dataset():
+    job = parse_jcl(_CONCAT + "//SYSIN DD *\n  SORT FIELDS=(1,10,CH,A)\n/*\n")
+    fl, = build_jcl_lineage(job)["fieldLineage"]
+    assert fl["input"] == "A.B.IN1"
+    assert fl["inputs"] == ["A.B.IN1", "A.B.IN2", "A.B.IN3"]
+    assert fl["output"] == "A.B.OUT"
+
+
+def test_binding_a_concatenated_ddname_lists_its_datasets_in_order():
+    """One step binding a ddname to several datasets is a concatenation - one file read
+    from each in turn - not the program running against different data."""
+    from jcl_dependencies.views import bind_cobol_artifacts
+    job = parse_jcl("//CATJOB JOB\n//S1 EXEC PGM=SQLUNLD\n"
+                    "//OUTDD DD DSN=PROD.B,DISP=SHR\n"
+                    "//      DD DSN=PROD.A,DISP=SHR\n", source_name="cat.jcl")
+    out = bind_cobol_artifacts(_sqlunld_manifest(), [job])
+    row = next(a for a in out["artifacts"] if a.get("ddname") == "OUTDD")
+    assert row["datasets"] == ["PROD.B", "PROD.A"]            # read order, not sorted
+    assert "dataset" not in row and "datasetCandidates" not in row
+    assert [e["concatIndex"] for e in row["boundBy"]] == [1, 2]
+    assert row["resolvedBy"] == "JCL DD statement: CATJOB.S1"
+    assert "needs" not in row
+    assert not any("different datasets" in f for f in out["flags"])
+
+
+def test_a_concatenation_in_one_job_and_a_single_dataset_in_another_are_candidates():
+    from jcl_dependencies.views import bind_cobol_artifacts
+    cat = parse_jcl("//CATJOB JOB\n//S1 EXEC PGM=SQLUNLD\n"
+                    "//OUTDD DD DSN=PROD.B,DISP=SHR\n"
+                    "//      DD DSN=PROD.A,DISP=SHR\n", source_name="cat.jcl")
+    one = parse_jcl("//ONEJOB JOB\n//S1 EXEC PGM=SQLUNLD\n"
+                    "//OUTDD DD DSN=PROD.B,DISP=SHR\n", source_name="one.jcl")
+    out = bind_cobol_artifacts(_sqlunld_manifest(), [cat, one])
+    row = next(a for a in out["artifacts"] if a.get("ddname") == "OUTDD")
+    assert row["datasetCandidates"] == ["PROD.A", "PROD.B"]
+    assert "dataset" not in row and "datasets" not in row
+    assert any("different datasets" in f for f in out["flags"])
+
+
+def test_the_example_publishes_every_dataset_each_concatenated_dd_reads():
+    job, lin, rows = _rows((EXAMPLES / "concat.jcl").read_text())
+    assert [r for r in rows if r[1] != "SORTOUT" and r[0] != "COPY1"] == [
+        ("MERGE", "SORTIN", 1, "PROD.SALES.DAILY.MON", "input"),
+        ("MERGE", "SORTIN", 2, "PROD.SALES.DAILY.TUE", "input"),
+        ("MERGE", "SORTIN", 3, "PROD.SALES.DAILY.WED", "input"),       # OLD: still read
+        ("LOAD.RUN", "INFILE", 1, "PROD.SALES.EXTRACT.EAST", "input"),
+        ("LOAD.RUN", "INFILE", 2, "PROD.SALES.EXTRACT.WEST.RERUN", "input"),
+        ("PRINT", "SYSUT1", None, "PROD.SALES.WEEK", "input"),
+        ("PRINT", "SYSUT2", 2, "PROD.SALES.WEEK.PRIOR", "input")]
+    copy1 = {r[1]: r for r in rows if r[0] == "COPY1"}
+    assert copy1["SYSUT1"][2:4] == (None, "PROD.SALES.DAILY.MON")     # referback: first
+    assert ("MERGE", "PRINT", "PROD.SALES.WEEK") in _edges(job)
+    assert len(job.flags) == 1 and "DDNAME=FEED" in job.flags[0]

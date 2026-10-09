@@ -44,31 +44,38 @@ def _seg_kind(seg: DDSegment) -> str:
     return "dataset"
 
 
-def _dd_io(dd: DD) -> Optional[str]:
-    """'input' / 'output' / 'inout' / None across a DD's segments (concatenation = input)."""
-    dirs = {d for d in (_dd_direction(s) for s in dd.segments) if d}
-    if not dirs:
-        return None
-    if dirs == {"input"}:
-        return "input"
-    if dirs == {"output"}:
-        return "output"
-    return "inout"
+def _is_dataset(seg: DDSegment) -> bool:
+    """A DD statement that names a dataset - catalogued or temporary - rather than
+    instream data, spool or DUMMY."""
+    return bool(seg.dsn) and not seg.instream and seg.sysout is None and not seg.dummy
+
+
+def _dd_members(dd: DD):
+    """Yield (segment, io, concatIndex) for every DD statement of a DD, in the order coded.
+
+    A named DD followed by unnamed ones is a concatenation: ONE ddname reading SEVERAL
+    datasets in turn, and every one of them is published - publishing the first alone
+    made the step read as though it read one file. ``concatIndex`` is the statement's
+    1-based position, and None for a DD that is a single statement, so an unconcatenated
+    DD reads exactly as it always did.
+
+    ``io`` is 'input' / 'output' / None, per statement. A dataset at position 2 or later
+    is always 'input': a concatenation is read through, so DISP=OLD or MOD on a later
+    statement says how that dataset is allocated, not that the step writes it."""
+    concatenated = len(dd.segments) > 1
+    for n, seg in enumerate(dd.segments, start=1):
+        io = "input" if n > 1 and _is_dataset(seg) else _dd_direction(seg)
+        yield seg, io, (n if concatenated else None)
 
 
 def _dd_dataset(dd: DD) -> Optional[DDSegment]:
     """The first real-dataset segment of a DD (for its identity), or None."""
-    for s in dd.segments:
-        if s.dsn and not s.instream and s.sysout is None and not s.dummy:
-            return s
-    return None
+    return next((s for s in dd.segments if _is_dataset(s)), None)
 
 
-def _dd_rows(job: Job):
-    """Yield (step, dd, seg_or_None, io) for every DD in the job."""
-    for step in job.steps:
-        for dd in step.dds:
-            yield step, dd, _dd_dataset(dd), _dd_io(dd)
+def _dd_datasets(dd: DD) -> List[str]:
+    """Every dataset a DD names, in the order its concatenation reads them."""
+    return [s.dsn for s in dd.segments if _is_dataset(s)]
 
 
 def _step_conditions(step: Step) -> Optional[dict]:
@@ -90,9 +97,12 @@ def _step_conditions(step: Step) -> Optional[dict]:
 # lineage
 # --------------------------------------------------------------------------- #
 
-def _dd_descriptor(dd: DD, seg: Optional[DDSegment], io: Optional[str]) -> dict:
-    d: dict = {"ddname": dd.ddname, "io": io}
-    if seg is not None:
+def _dd_descriptor(dd: DD, seg: DDSegment, io: Optional[str], pos: Optional[int]) -> dict:
+    d: dict = {"ddname": dd.ddname}
+    if pos:
+        d["concatIndex"] = pos
+    d["io"] = io
+    if _is_dataset(seg):
         d["dataset"] = seg.dsn
         if seg.member:
             d["member"] = seg.member
@@ -103,10 +113,9 @@ def _dd_descriptor(dd: DD, seg: Optional[DDSegment], io: Optional[str]) -> dict:
         d["kind"] = "dataset"
     else:
         # instream / spool / dummy / unresolved
-        seg0 = dd.segments[0] if dd.segments else None
-        d["kind"] = _seg_kind(seg0) if seg0 else "unknown"
-        if seg0 and seg0.sysout is not None:
-            d["sysout"] = seg0.sysout
+        d["kind"] = _seg_kind(seg)
+        if seg.sysout is not None:
+            d["sysout"] = seg.sysout
     if dd.override:
         d["override"] = True
     return d
@@ -153,6 +162,8 @@ def _field_lineage(step: Step) -> Optional[dict]:
             ds = _dd_dataset(dd) if dd else None
             if ds and ds.dsn:
                 row["dataset"] = ds.dsn   # LOAD reads it into the table; UNLOAD fills it
+                if len(_dd_datasets(dd)) > 1:
+                    row["datasets"] = _dd_datasets(dd)      # ... all of a concatenation
             tables.append(row)
     if tables:
         result["tables"] = tables
@@ -165,6 +176,8 @@ def _field_lineage(step: Step) -> Optional[dict]:
     so = _dd_dataset(out_dd) if out_dd else None
     if si:
         result["input"] = si.dsn
+        if len(_dd_datasets(in_dd)) > 1:
+            result["inputs"] = _dd_datasets(in_dd)   # a concatenated input, in read order
     if so:
         result["output"] = so.dsn
     if control.get("filter"):
@@ -204,20 +217,23 @@ def build_jcl_lineage(job: Job) -> dict:
     # dataset identity (DSN, generation-independent) -> producers / consumers
     datasets: Dict[str, dict] = {}
 
-    def touch(seg: DDSegment, step: Step, dd: DD, io: Optional[str]) -> None:
+    def touch(seg: DDSegment, step: Step, dd: DD, io: Optional[str],
+              pos: Optional[int]) -> None:
         key = seg.dsn
         rec = datasets.setdefault(key, {
             "dsn": key, "producedBy": [], "consumedBy": [],
             "temporary": key.startswith("&&")})
-        entry = {"step": step.name, "ddname": dd.ddname,
-                 "disp": seg.disp[0] if seg.disp else None}
+        entry = {"step": step.name, "ddname": dd.ddname}
+        if pos:
+            entry["concatIndex"] = pos
+        entry["disp"] = seg.disp[0] if seg.disp else None
         if seg.gdg:
             entry["generation"] = seg.gdg
         if io == "output":
             rec["producedBy"].append(entry)
         elif io == "input":
             rec["consumedBy"].append(entry)
-        else:                                   # inout / unknown -> record on both, noted
+        else:                                   # unknown -> record on both, noted
             rec["producedBy"].append({**entry, "note": "direction ambiguous (OLD/I-O)"})
             rec["consumedBy"].append({**entry, "note": "direction ambiguous (OLD/I-O)"})
 
@@ -230,17 +246,16 @@ def build_jcl_lineage(job: Job) -> dict:
     for step in job.steps:
         inputs, outputs = [], []
         for dd in step.dds:
-            seg = _dd_dataset(dd)
-            io = _dd_io(dd)
-            desc = _dd_descriptor(dd, seg, io)
-            if io == "output":
-                outputs.append(desc)
-            elif io == "input":
-                inputs.append(desc)
-            else:
-                (outputs if desc["kind"] == "spool" else inputs).append(desc)
-            if seg is not None:
-                touch(seg, step, dd, io)
+            for seg, io, pos in _dd_members(dd):
+                desc = _dd_descriptor(dd, seg, io, pos)
+                if io == "output":
+                    outputs.append(desc)
+                elif io == "input":
+                    inputs.append(desc)
+                else:
+                    (outputs if desc["kind"] == "spool" else inputs).append(desc)
+                if _is_dataset(seg):
+                    touch(seg, step, dd, io, pos)
         srow: dict = {"step": step.name, "program": step.pgm}
         if step.from_proc:
             srow["proc"] = step.from_proc
@@ -260,23 +275,30 @@ def build_jcl_lineage(job: Job) -> dict:
     # The join that resolves the COBOL side: for each step running a program, the
     # ddname -> dataset binding. A COBOL program's interface knows only `OUT-FILE ASSIGN
     # OUTDD`; this says OUTDD -> PROD.ACCT.UNLOAD, the DSN that program was missing.
+    # A concatenated DD binds its ddname to SEVERAL datasets: one row each, in read
+    # order, so a row's key is (step, ddname, concatIndex) and (step, ddname) alone no
+    # longer names one row. A statement that names no dataset (DD *, DUMMY) has no row,
+    # concatenated or not - its position is simply not among them.
     bindings: List[dict] = []
     for step in job.steps:
         if not step.pgm:
             continue
         for dd in step.dds:
-            seg = _dd_dataset(dd)
-            if seg is None:
-                continue
-            b = {"program": step.pgm, "step": step.name, "ddname": dd.ddname,
-                 "dataset": seg.dsn, "io": _dd_io(dd)}
-            if seg.gdg:
-                b["generation"] = seg.gdg
-            if seg.member:
-                b["member"] = seg.member
-            if conds.get(step.name):
-                b["conditions"] = conds[step.name]
-            bindings.append(b)
+            for seg, io, pos in _dd_members(dd):
+                if not _is_dataset(seg):
+                    continue
+                b = {"program": step.pgm, "step": step.name, "ddname": dd.ddname}
+                if pos:
+                    b["concatIndex"] = pos
+                b["dataset"] = seg.dsn
+                b["io"] = io
+                if seg.gdg:
+                    b["generation"] = seg.gdg
+                if seg.member:
+                    b["member"] = seg.member
+                if conds.get(step.name):
+                    b["conditions"] = conds[step.name]
+                bindings.append(b)
 
     # dataflow edges: a dataset produced by one step and consumed by another is an edge.
     # An edge holds only when BOTH its steps actually run, so a conditional endpoint's
@@ -314,7 +336,12 @@ def build_jcl_lineage(job: Job) -> dict:
             "record field traced to the input bytes it copies (SORT BUILD/OUTREC), plus "
             "the filter (INCLUDE/OMIT COND) that decides which records survive. A DSN with "
             "a GDG relative generation is keyed on its base (the stable identity) with the "
-            "generation recorded. 'conditions' on a step (and on the dataflow edges and "
+            "generation recorded. A concatenated DD (a named DD followed by unnamed ones) "
+            "is ONE ddname reading SEVERAL datasets: each is listed, with 'concatIndex' "
+            "its 1-based position among the DD's statements, so a ddBindings row is keyed "
+            "on (step, ddname, concatIndex) and a DD of one statement carries no "
+            "'concatIndex'. A dataset at position 2 or later is always read, whatever its "
+            "DISP. 'conditions' on a step (and on the dataflow edges and "
             "ddBindings it contributes) say when it actually runs: 'if' is the IF/THEN/"
             "ELSE nesting (every test must hold, negated=true for an ELSE branch), 'cond' "
             "is the parsed COND= with its BYPASS sense spelt out ('runsWhen' is the "
@@ -341,8 +368,8 @@ def build_jcl_lineage(job: Job) -> dict:
 # --------------------------------------------------------------------------- #
 
 def _io_from_dirs(dirs: set) -> str:
-    r = "input" in dirs or "inout" in dirs
-    w = "output" in dirs or "inout" in dirs
+    r = "input" in dirs
+    w = "output" in dirs
     if r and w:
         return "read-write"
     return "read" if r else "write"
@@ -368,25 +395,27 @@ def build_jcl_artifacts(job: Job, *, synonyms: Optional[SynonymLookup] = None) -
     # with a step that never read it - and stage 2 would then never fetch the second.
     # (Plain datasets below stay keyed on the DSN: there the library IS the identity.)
     control_members: Dict[Tuple[str, Optional[str]], dict] = {}
-    for step, dd, seg, io in _dd_rows(job):
+    # Every dataset of a concatenated DD is a row (or a touch on one), not the first alone.
+    members = [(step, dd, seg, io, pos) for step in job.steps for dd in step.dds
+               for seg, io, pos in _dd_members(dd) if _is_dataset(seg)]
+    for step, dd, seg, io, pos in members:
+        touched = {"step": step.name, "ddname": dd.ddname}
+        if pos:
+            touched["concatIndex"] = pos
         # a control-card DATASET (SYSIN DD DSN=...): a parameter file, not plain data
-        is_card_dd = dd.ddname in ("SYSIN", "TOOLIN", "SYSTSIN", "DFSPARM")
-        if seg is not None and is_card_dd:
+        if dd.ddname in ("SYSIN", "TOOLIN", "SYSTSIN", "DFSPARM"):
             rec = control_members.setdefault((seg.dsn, seg.member), {
                 "artifact": seg.dsn + (f"({seg.member})" if seg.member else ""),
                 "kind": "control-card", "dependency": "runtime", "io": "read",
                 "identity": "global", "touchedBy": []})
-            rec["touchedBy"].append({"step": step.name, "ddname": dd.ddname})
-            continue
-        if seg is None:
+            rec["touchedBy"].append(touched)
             continue
         rec = ds.setdefault(seg.dsn, {
             "dsn": seg.dsn, "_dirs": set(), "touchedBy": [],
             "temporary": seg.dsn.startswith("&&"),
             "generations": set()})
         rec["_dirs"].add(io or "unknown")
-        touched = {"step": step.name, "ddname": dd.ddname,
-                   "disp": seg.disp[0] if seg.disp else None}
+        touched["disp"] = seg.disp[0] if seg.disp else None
         if _step_conditions(step):
             touched["conditional"] = True     # the touch happens only if the step runs
         rec["touchedBy"].append(touched)
@@ -409,7 +438,7 @@ def build_jcl_artifacts(job: Job, *, synonyms: Optional[SynonymLookup] = None) -
         if gens:
             row["generations"] = gens
             row["gdg"] = True
-        if "unknown" in dirs or "inout" in dirs:
+        if "unknown" in dirs:
             row["directionAmbiguous"] = True
         if temporary:
             row["temporary"] = True
@@ -540,7 +569,7 @@ def build_jcl_artifacts(job: Job, *, synonyms: Optional[SynonymLookup] = None) -
     # spool (SYSOUT) and DUMMY are noted, not treated as related artifacts
     excluded: List[dict] = []
     spool_seen, dummy_seen = set(), set()
-    for step, dd, seg, io in _dd_rows(job):
+    for dd in (dd for step in job.steps for dd in step.dds):
         seg0 = dd.segments[0] if dd.segments else None
         if seg0 and seg0.sysout is not None and dd.ddname not in spool_seen:
             spool_seen.add(dd.ddname)
@@ -568,7 +597,9 @@ def build_jcl_artifacts(job: Job, *, synonyms: Optional[SynonymLookup] = None) -
             "is assembled from (dependency: compile-time) - the same shape as the COBOL "
             "artifact manifest. A real DSN is already the catalog-global identity "
             "(resolvedBy: null); a temporary (&&) dataset is job-scoped scratch; a GDG is "
-            "keyed on its base with the generation recorded. Programs resolve via the load "
+            "keyed on its base with the generation recorded. Every dataset of a "
+            "concatenated DD is a row (or a touch on one), its 'touchedBy' entry carrying "
+            "the 'concatIndex' it holds in that DD. Programs resolve via the load "
             "library, PROCs/INCLUDE via the JCLLIB/PROCLIB concatenation (the SYSLIB-order "
             "hazard again). SYSOUT and DUMMY are excluded with the reason. Nothing is "
             "invented - unresolved symbolics/PROCs are in 'flags'."
@@ -593,7 +624,9 @@ def bind_cobol_artifacts(cobol_manifest: dict, jobs) -> dict:
     ``(program, ddname)``, each matched file row gains ``dataset`` and ``boundBy`` (which
     job/step made the binding, with the step's run conditions where the JCL is
     conditional), and its ``resolvedBy`` becomes the ACTUAL DD statement rather than the
-    category "JCL DD statement".
+    category "JCL DD statement". A ddname the step CONCATENATES is one file read from
+    several datasets in turn: the row gains ``datasets``, the list in read order, in place
+    of ``dataset``, and each ``boundBy`` entry carries its ``concatIndex``.
 
     Honesty rules: the same program bound to DIFFERENT datasets across the supplied jobs
     is a fact, not an error - the row lists ``datasetCandidates`` instead of picking one,
@@ -616,7 +649,7 @@ def bind_cobol_artifacts(cobol_manifest: dict, jobs) -> dict:
                 continue
             entry = {"job": job.name or job.source_name, "step": b["step"],
                      "dataset": b["dataset"], "io": b["io"]}
-            for k in ("generation", "member", "conditions"):
+            for k in ("concatIndex", "generation", "member", "conditions"):
                 if b.get(k):
                     entry[k] = b[k]
             by_ddname.setdefault(b["ddname"], []).append(entry)
@@ -630,9 +663,19 @@ def bind_cobol_artifacts(cobol_manifest: dict, jobs) -> dict:
             continue
         matched += 1
         row["boundBy"] = found
+        # What each step binds the ddname to, in read order: one dataset, or the several
+        # of a concatenation. Steps that agree have closed the binding; a concatenation
+        # is one answer, not the program running against different data.
+        per_step: Dict[Tuple[str, str], List[str]] = {}
+        for e in found:
+            per_step.setdefault((e["job"], e["step"]), []).append(e["dataset"])
+        readings = {tuple(v) for v in per_step.values()}
         datasets = sorted({e["dataset"] for e in found})
-        if len(datasets) == 1:
-            row["dataset"] = datasets[0]
+        if len(readings) == 1:
+            if len(datasets) == 1:
+                row["dataset"] = datasets[0]
+            else:
+                row["datasets"] = list(next(iter(readings)))
             row["resolvedBy"] = "JCL DD statement: " + ", ".join(
                 sorted({f"{e['job']}.{e['step']}" for e in found}))
             # The chain is closed: the ddname now has its DSN, so nothing further is
@@ -690,11 +733,12 @@ def _provides(job: Job) -> List[dict]:
         rows.append({"name": proc_name, "kind": "proc",
                      "provides": "the PROC itself, EXECable by name"})
     seen = set()
-    for step, dd, seg, io in _dd_rows(job):
+    for step, seg, io in ((step, seg, io) for step in job.steps for dd in step.dds
+                          for seg, io, _ in _dd_members(dd)):
         # Written, real, and not job-scoped scratch. A temporary (&&) dataset cannot be
         # depended on from outside the job, so asking about it would be asking a question
         # with a known answer.
-        if seg is None or io not in ("output", "inout") or seg.dsn.startswith("&&"):
+        if not _is_dataset(seg) or io != "output" or seg.dsn.startswith("&&"):
             continue
         if seg.dsn in seen:
             continue
